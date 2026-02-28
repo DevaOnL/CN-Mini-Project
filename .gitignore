@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Pytest
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated analysis outputs (keep logs, ignore images)
+analysis/*.png
+
+# Metrics logs (generated at runtime)
+analysis/logs/*.json
+
+# Editor session files
+*.sublime-workspace
+*.sublime-project
