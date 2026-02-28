@@ -122,9 +122,7 @@ multiplayer-engine/
 ├── requirements.txt            #   Pip requirements
 ├── .gitignore
 ├── LICENSE                     #   MIT License
-├── README.md                   #   ← You are here
-├── RUNNING.md                  #   Step-by-step run & reproduce guide
-└── GITHUB_PUSH.md              #   How to push to GitHub
+└── README.md                   #   ← You are here
 ```
 
 ---
@@ -133,8 +131,8 @@ multiplayer-engine/
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/<your-username>/multiplayer-engine.git
-cd multiplayer-engine
+git clone https://github.com/DevaOnL/CN-Mini-Project.git
+cd CN-Mini-Project
 
 # 2. Create a virtual environment
 python3 -m venv .venv
