@@ -12,10 +12,9 @@ Handles:
 import socket
 import struct
 import time
-import os
 
 from common.packet import (
-    Packet, PacketType, HEADER_SIZE,
+    Packet, PacketType,
     INPUT_FORMAT, INPUT_SIZE, PING_FORMAT, PING_SIZE
 )
 from common.net import create_server_socket, AckTracker, NetworkSimulator

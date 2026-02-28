@@ -30,9 +30,11 @@ COLORS = [
 class GameRenderer:
     """Pygame-based renderer for the game demo."""
 
-    def __init__(self, width: int = WORLD_WIDTH, height: int = WORLD_HEIGHT):
-        if not PYGAME_AVAILABLE:
-            print("[RENDERER] pygame not available — running headless")
+    def __init__(self, width: int = WORLD_WIDTH, height: int = WORLD_HEIGHT,
+                 headless: bool = False):
+        if headless or not PYGAME_AVAILABLE:
+            if not PYGAME_AVAILABLE and not headless:
+                print("[RENDERER] pygame not available — running headless")
             self.headless = True
             return
 

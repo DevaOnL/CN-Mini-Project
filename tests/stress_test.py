@@ -12,7 +12,7 @@ import json
 
 from common.packet import Packet, PacketType, INPUT_FORMAT
 from common.snapshot import Snapshot
-from common.config import DEFAULT_PORT
+from common.config import DEFAULT_PORT, DEFAULT_BUFFER_SIZE
 
 
 class StressBotClient:
@@ -45,7 +45,7 @@ class StressBotClient:
     def receive(self):
         for _ in range(50):
             try:
-                data, _ = self.sock.recvfrom(4096)
+                data, _ = self.sock.recvfrom(DEFAULT_BUFFER_SIZE)
                 self.bytes_received += len(data)
                 pkt = Packet.deserialize(data)
                 if pkt.packet_type == PacketType.CONNECT_ACK:

@@ -6,8 +6,10 @@ import socket
 import time
 import random
 
+from common.config import DEFAULT_HOST, DEFAULT_PORT
 
-def create_server_socket(host: str = "0.0.0.0", port: int = 9000) -> socket.socket:
+
+def create_server_socket(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> socket.socket:
     """Create and bind a non-blocking UDP socket for the server."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

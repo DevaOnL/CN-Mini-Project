@@ -34,7 +34,7 @@ class ConnectedClient:
     def is_timed_out(self, timeout: float = CLIENT_TIMEOUT) -> bool:
         return time.time() - self.last_heard > timeout
 
-    def get_bandwidth_kbps(self) -> tuple:
+    def get_bandwidth_KBps(self) -> tuple:
         """Get (sent_KB/s, recv_KB/s) since last check."""
         now = time.time()
         elapsed = now - self.last_bandwidth_check

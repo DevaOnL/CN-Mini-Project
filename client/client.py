@@ -6,7 +6,6 @@ handles prediction, reconciliation, and interpolation.
 import socket
 import struct
 import time
-import os
 
 from common.packet import (
     Packet, PacketType,
@@ -338,8 +337,7 @@ class GameClient:
 
         # Create renderer
         if self.headless:
-            renderer = GameRenderer.__new__(GameRenderer)
-            renderer.headless = True
+            renderer = GameRenderer(headless=True)
         else:
             renderer = GameRenderer()
 

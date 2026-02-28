@@ -44,12 +44,14 @@ class MetricsLogger:
         self._prev_rtt = rtt_ms
 
     def log_packet_loss(self, loss_rate: float):
+        """Log a packet loss rate sample."""
         t = time.time() - self.start_time
         self.data['packet_loss'].append({
             't': round(t, 4), 'loss': round(loss_rate, 6)
         })
 
     def log_bandwidth(self, bytes_sent: int, bytes_recv: int):
+        """Log bandwidth usage for the current interval."""
         t = time.time() - self.start_time
         self.data['bandwidth'].append({
             't': round(t, 4),
@@ -58,12 +60,14 @@ class MetricsLogger:
         })
 
     def log_prediction_error(self, error_px: float):
+        """Log a client-side prediction error sample."""
         t = time.time() - self.start_time
         self.data['prediction_error'].append({
             't': round(t, 4), 'error_px': round(error_px, 3)
         })
 
     def log_tick_time(self, tick: int, duration_ms: float):
+        """Log server tick processing duration."""
         self.data['tick_times'].append({
             'tick': tick, 'duration_ms': round(duration_ms, 4)
         })

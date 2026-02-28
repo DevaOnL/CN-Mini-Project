@@ -73,4 +73,8 @@ def smooth_correction(current_visual: dict, target: dict,
     result = current_visual.copy()
     result['x'] = current_visual['x'] + (target['x'] - current_visual['x']) * smoothing
     result['y'] = current_visual['y'] + (target['y'] - current_visual['y']) * smoothing
+    # Snap non-positional fields to the target immediately
+    result['vx'] = target.get('vx', result.get('vx', 0.0))
+    result['vy'] = target.get('vy', result.get('vy', 0.0))
+    result['health'] = target.get('health', result.get('health', 100.0))
     return result

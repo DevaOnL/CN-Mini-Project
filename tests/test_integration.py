@@ -7,7 +7,6 @@ OS scheduler reliably switches between the test process and the server
 subprocess, avoiding hangs on Python 3.14+.
 """
 
-import os
 import select
 import socket
 import struct
@@ -18,7 +17,7 @@ import random
 
 from common.packet import Packet, PacketType, INPUT_FORMAT
 from common.snapshot import Snapshot
-from common.config import DEFAULT_PORT
+from common.config import DEFAULT_PORT, DEFAULT_BUFFER_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +59,7 @@ class BotClient:
         # Socket has data – drain everything available
         for _ in range(200):
             try:
-                data, _ = self.sock.recvfrom(4096)
+                data, _ = self.sock.recvfrom(DEFAULT_BUFFER_SIZE)
             except (BlockingIOError, OSError):
                 break
             self._handle(data)
@@ -121,7 +120,7 @@ def _wait_for_server(proc: subprocess.Popen, port: int,
             ready, _, _ = select.select([sock], [], [], 0.3)
             if ready:
                 try:
-                    data, _ = sock.recvfrom(4096)
+                    data, _ = sock.recvfrom(DEFAULT_BUFFER_SIZE)
                     rpkt = Packet.deserialize(data)
                     if rpkt.packet_type == PacketType.CONNECT_ACK:
                         # Server is alive – send disconnect so we don't
