@@ -13,10 +13,16 @@ dependencies = [
     "pygame-ce>=2.5.0",
     "matplotlib>=3.7.0",
     "numpy>=1.24.0",
+    "cryptography>=46.0.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+
+[project.scripts]
+multiplayer-engine-server = "server.server:main"
+multiplayer-engine-client = "client.client:main"
+multiplayer-engine-analyze = "analysis.plot_results:main"
 
 [tool.setuptools.packages.find]
 include = ["common*", "server*", "client*", "analysis*"]

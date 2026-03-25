@@ -1,335 +1,202 @@
-# Real-Time Multiplayer Game Networking Engine
+# Multiplayer Engine
 
-A **from-scratch** implementation of a real-time multiplayer game networking engine built with Python and UDP sockets. Designed as a Computer Networks course project, this engine demonstrates all the core techniques used by professional game engines — authoritative servers, client-side prediction, server reconciliation, entity interpolation, and a custom binary protocol.
+## Project Overview
 
-> **Course:** Computer Networks (CN)  
-> **Project:** Sl. No. 5 — Real-Time Multiplayer Game Networking Engine
+`multiplayer-engine` is a Python 3.10+ real-time multiplayer arena demo built on
+raw UDP sockets and `pygame-ce`. It demonstrates an authoritative server,
+client-side prediction, reconciliation, interpolation, reconnectable session
+tokens, a mandatory room-key-secured UDP transport layer, a scene-based GUI,
+reliable gameplay events, and lightweight network analysis tooling.
 
----
+Tech stack:
 
-## Table of Contents
-
-- [Features](#features)
-- [Architecture](#architecture)
-- [Project Structure](#project-structure)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
-  - [Running the Server](#running-the-server)
-  - [Running a Client](#running-a-client)
-  - [Command-Line Options](#command-line-options)
-- [Controls](#controls)
-- [Testing](#testing)
-- [Network Analysis](#network-analysis)
-- [Protocol Specification](#protocol-specification)
-- [Stress Test Results](#stress-test-results)
-- [Technical Deep Dive](#technical-deep-dive)
-- [License](#license)
-
----
-
-## Features
-
-| Category | Details |
-|----------|---------|
-| **Custom Binary Protocol** | 15-byte header with protocol ID, sequence numbers, piggybacked acks, and 9 packet types |
-| **Authoritative Server** | Fixed tick-rate simulation (default 20 Hz), server owns all game state |
-| **Client-Side Prediction** | Inputs applied instantly for zero-latency feel |
-| **Server Reconciliation** | Server corrections replayed with unacked inputs to avoid visual snapping |
-| **Entity Interpolation** | Remote players rendered 2 ticks behind for smooth motion |
-| **Packet Loss Resilience** | Redundant inputs (last 3 per packet), piggybacked ack bitfield |
-| **Network Simulation** | Built-in configurable packet loss and latency injection |
-| **Performance Metrics** | RTT, jitter (RFC 3550), packet loss, bandwidth, tick times — all logged to JSON |
-| **Analysis Tooling** | Matplotlib-based visualization with 4-panel latency analysis, CDF plots, bandwidth charts |
-| **Stress Testing** | Automated load tests with 2–16 concurrent bot clients |
-
----
+- Python 3.10+
+- Raw UDP sockets with a custom binary protocol
+- App-layer authenticated encryption over UDP (`cryptography`, ChaCha20-Poly1305)
+- `pygame-ce` for the client GUI and renderer
+- `matplotlib` + `numpy` for metrics analysis
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        GAME CLIENT                              │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────┐  │
-│  │  Input    ├──►  Prediction  ├──►  Reconciler   │  │Renderer│  │
-│  │  Handler  │  │  (local sim) │  │  (on snapshot)│  │(pygame)│  │
-│  └──────────┘  └──────────────┘  └───────┬───────┘  └───▲────┘  │
-│                                          │              │       │
-│                    ┌─────────────────────┐│              │       │
-│                    │  Interpolator       ││              │       │
-│                    │  (remote entities)  ├┘──────────────┘       │
-│                    └─────────────────────┘                       │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │ UDP (Custom Binary Protocol)
-                           │
-┌──────────────────────────▼───────────────────────────────────────┐
-│                      GAME SERVER (Authoritative)                │
-│  ┌──────────────┐  ┌──────────────┐  ┌─────────────────────┐   │
-│  │  Input Queue  ├──►  Physics /   ├──►  Snapshot Broadcast  │   │
-│  │  (per-client) │  │  Game State  │  │  (to all clients)   │   │
-│  └──────────────┘  └──────────────┘  └─────────────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐                             │
-│  │  Client Mgr  │  │  Metrics     │                             │
-│  │  (timeouts)  │  │  Logger      │                             │
-│  └──────────────┘  └──────────────┘                             │
-└──────────────────────────────────────────────────────────────────┘
-```
+**Protocol layer** - `common/packet.py`, `common/net.py`, `common/security.py`, `common/snapshot.py`, and `common/config.py` define the 15-byte UDP header, secure hello handshake, encrypted payload framing, ack/bitfield logic, snapshot encoding, reconnect tokens, and shared runtime constants. Reliable events ride on top of normal UDP packets using retransmission and duplicate suppression.
 
----
+**Server loop** - `server/server.py`, `server/game_state.py`, `server/client_manager.py`, and `server/session_manager.py` implement the authoritative fixed-tick simulation. The server owns movement, dash cooldowns, collision damage, respawns, scoring, match win detection, reconnect/session mapping, and snapshot broadcast cadence.
 
-## Project Structure
+**Client loop** - `client/client.py`, `client/prediction.py`, `client/reconciliation.py`, and `client/interpolation.py` resolve hostnames, connect over UDP, predict the local player, reconcile against authoritative snapshots, interpolate remote entities, process reliable match events, and keep gameplay state synchronized with the server.
 
-```
-multiplayer-engine/
-├── common/                     # Shared networking library
-│   ├── __init__.py             #   Package exports
-│   ├── config.py               #   Game constants & network defaults
-│   ├── packet.py               #   Binary protocol — serialize/deserialize
-│   ├── net.py                  #   Socket helpers, AckTracker, NetworkSimulator
-│   ├── snapshot.py             #   Game state snapshot format
-│   └── metrics_logger.py       #   RTT/jitter/loss/bandwidth logging
-│
-├── server/                     # Authoritative game server
-│   ├── __init__.py
-│   ├── game_state.py           #   Physics simulation & world state
-│   ├── client_manager.py       #   Connected client tracking & timeouts
-│   └── server.py               #   Main loop — receive, simulate, broadcast
-│
-├── client/                     # Game client
-│   ├── __init__.py
-│   ├── prediction.py           #   Client-side prediction (matches server physics)
-│   ├── reconciliation.py       #   Server reconciliation & visual smoothing
-│   ├── interpolation.py        #   Entity interpolation for remote players
-│   ├── renderer.py             #   Pygame 2D visualization + HUD
-│   └── client.py               #   Main loop — input, predict, send, render
-│
-├── analysis/                   # Performance analysis
-│   ├── __init__.py
-│   ├── plot_results.py         #   Matplotlib charts from metrics JSON
-│   └── logs/                   #   Auto-generated metrics data
-│
-├── tests/                      # Test suite
-│   ├── __init__.py
-│   ├── test_packet.py          #   9 unit tests — packet protocol
-│   ├── test_prediction.py      #   13 unit tests — prediction & reconciliation
-│   ├── test_snapshot.py        #   9 unit tests — snapshots & game state
-│   ├── test_integration.py     #   3 integration tests — full server+client
-│   └── stress_test.py          #   Load test — 2/4/8/16 concurrent clients
-│
-├── docs/
-│   └── protocol_spec.md        #   Full binary protocol specification
-│
-├── pyproject.toml              #   Project metadata & dependencies
-├── requirements.txt            #   Pip requirements
-├── .gitignore
-├── LICENSE                     #   MIT License
-└── README.md                   #   ← You are here
-```
-
----
+**GUI scene graph** - `client/gui/scene_manager.py` drives the scene stack. `client/gui/scenes/main_menu.py`, `client/gui/scenes/join_dialog.py`, `client/gui/scenes/lobby.py`, `client/gui/scenes/game_hud.py`, `client/gui/scenes/match_over.py`, and `client/gui/scenes/settings.py` provide the full host/join/lobby/in-game/match-over/settings flow.
 
 ## Quick Start
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/DevaOnL/CN-Mini-Project.git
-cd CN-Mini-Project
-
-# 2. Create a virtual environment
+git clone https://github.com/DevaOnL/multiplayer-engine.git
+cd multiplayer-engine
 python3 -m venv .venv
 source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-pip install pytest   # for testing
-
-# 4. Install the project in editable mode (fixes all imports)
-pip install -e .
-
-# 5. Start the server (Terminal 1)
-python -m server.server
-
-# 6. Start a client (Terminal 2)
-python -m client.client
+pip install -e .[dev]
 ```
 
----
-
-## Usage
-
-### Running the Server
+Run the server:
 
 ```bash
-python -m server.server [OPTIONS]
+multiplayer-engine-server --room-key "shared secret"
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--host` | `0.0.0.0` | Bind address |
-| `--port` | `9000` | Bind port |
-| `--tick-rate` | `20` | Simulation ticks per second (Hz) |
-| `--loss` | `0.0` | Simulated packet loss rate (0.0–1.0) |
-| `--latency` | `0.0` | Simulated base latency in seconds |
-
-### Running a Client
+Run the client:
 
 ```bash
-python -m client.client [OPTIONS]
+multiplayer-engine-client
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--host` | `127.0.0.1` | Server address |
-| `--port` | `9000` | Server port |
-| `--tick-rate` | `20` | Client tick rate (Hz) |
-| `--headless` | `false` | Run without pygame window (for bots) |
-| `--loss` | `0.0` | Client-side simulated packet loss |
-| `--latency` | `0.0` | Client-side simulated latency (s) |
-
-### Command-Line Options
-
-**Example: Test with simulated bad network conditions**
-```bash
-# Server with 10% loss and 50ms latency
-python -m server.server --loss 0.1 --latency 0.05
-
-# Client connecting to it
-python -m client.client --loss 0.05 --latency 0.03
-```
-
----
-
-## Controls
-
-| Key | Action |
-|-----|--------|
-| `W` / `↑` | Move up |
-| `A` / `←` | Move left |
-| `S` / `↓` | Move down |
-| `D` / `→` | Move right |
-| `Space` | Action (reserved) |
-| `Escape` | Quit |
-
----
-
-## Testing
+Host + join from two terminals:
 
 ```bash
-# Run all unit tests (31 tests)
-python -m pytest tests/test_packet.py tests/test_prediction.py tests/test_snapshot.py -v
+# Terminal 1
+multiplayer-engine-server --port 9000 --room-key "shared secret"
 
-# Run integration tests (3 tests — spawns real server + bot clients)
-python -m pytest tests/test_integration.py -v
-
-# Run ALL tests at once (34 tests)
-python -m pytest tests/ -v
-
-# Run stress test (2/4/8/16 concurrent bot clients)
-python tests/stress_test.py
+# Terminal 2
+multiplayer-engine-client --headless --host 127.0.0.1 --port 9000 --room-key "shared secret"
 ```
 
-### Test Coverage
+You can also host directly from the GUI main menu. GUI host and join now both
+require a room key, and GUI-hosted servers bind to `0.0.0.0` so a second
+device on the same LAN can join with the shown LAN IPv4 address plus the shared
+room key.
 
-| Test File | Tests | What It Covers |
-|-----------|-------|----------------|
-| `test_packet.py` | 9 | Binary serialization, protocol ID validation, sequence wrapping, edge cases |
-| `test_prediction.py` | 13 | Client-side prediction physics, diagonal normalization, bounds clamping, reconciliation |
-| `test_snapshot.py` | 9 | Snapshot round-trip, entity state, game state physics, add/remove entities |
-| `test_integration.py` | 3 | Full connection lifecycle, multi-client state convergence, packet loss tolerance |
-| `stress_test.py` | 4 scenarios | Performance under 2/4/8/16 concurrent clients |
+## Gameplay
 
----
+- `WASD` / arrow keys - move
+- `SPACE` - dash (1 second cooldown)
+- Contact with another player deals damage over time
+- Dead players respawn after 3 seconds
+- First player to 5 kills wins, or highest score wins when the match timer ends
+- `TAB` - toggle scoreboard overlay
+- `ESC` - pause menu
 
-## Network Analysis
+## Configuration
 
-After running the server/client, metrics are saved to `analysis/logs/`. Analyze them:
+Core runtime settings live in `common/config.py`.
 
-```bash
-python analysis/plot_results.py analysis/logs/server_metrics.json
-```
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `WORLD_WIDTH` | `800` | Arena width |
+| `WORLD_HEIGHT` | `600` | Arena height |
+| `PLAYER_SPEED` | `200.0` | Base movement speed |
+| `PLAYER_RADIUS` | `15` | Player collision/render radius |
+| `DASH_SPEED_MULTIPLIER` | `3.5` | Dash speed multiplier |
+| `DASH_DURATION` | `0.12` | Dash duration in seconds |
+| `DASH_COOLDOWN` | `1.0` | Dash cooldown in seconds |
+| `CONTACT_DAMAGE_PER_SEC` | `20.0` | Collision damage per second |
+| `RESPAWN_HEALTH` | `100.0` | Health after respawn |
+| `RESPAWN_DELAY_TICKS` | `60` | Respawn delay at 20 Hz |
+| `KILLS_TO_WIN` | `5` | Score target to win |
+| `MATCH_DURATION_SECS` | `120.0` | Match time limit (`0` disables) |
+| `MATCH_OVER_DISPLAY_SECS` | `5.0` | Results-screen duration |
+| `DEFAULT_HOST` | `0.0.0.0` | Default server bind address |
+| `DEFAULT_PORT` | `9000` | Default server port |
+| `DEFAULT_TICK_RATE` | `20` | Server/client simulation tick rate |
+| `DEFAULT_BUFFER_SIZE` | `4096` | UDP recv buffer size |
+| `CLIENT_TIMEOUT` | `10.0` | Session timeout threshold |
+| `CONNECT_RETRY_INTERVAL` | `1.0` | Reconnect retry interval |
+| `PING_INTERVAL` | `1.0` | Ping interval |
+| `INTERPOLATION_TICKS` | `2` | Remote interpolation delay |
+| `INPUT_REDUNDANCY` | `3` | Inputs bundled per packet |
+| `RELIABLE_MAX_RETRIES` | `5` | Reliable resend cap |
+| `RELIABLE_RETRY_INTERVAL` | `0.2` | Reliable resend interval |
 
-This generates:
-- **`network_analysis.png`** — RTT over time, jitter, RTT distribution with P50/P95/P99, packet loss rate
-- **`prediction_error_analysis.png`** — Prediction error time series + CDF
-- **`bandwidth_analysis.png`** — Send/receive bandwidth over time
-- **`tick_time_analysis.png`** — Server tick processing time per tick
+The GUI settings screen persists host, port, player name, FPS target,
+interpolation buffer, and HUD debug visibility in
+`~/.multiplayer_engine_config.json`. The room key is never persisted there and
+stays in memory only for the current process/session.
 
----
-
-## Protocol Specification
-
-Full specification in [`docs/protocol_spec.md`](docs/protocol_spec.md).
-
-### Header Format (15 bytes)
-
-```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     Protocol ID (0x47414D45)                  |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       Sequence Number         |        Ack Number             |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       Ack Bitfield                            |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  Packet Type  |       Payload Length          |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
+## Protocol Reference
 
 ### Packet Types
 
-| Code | Name | Direction | Purpose |
+| Byte | Name | Direction | Payload Summary |
+|------|------|-----------|-----------------|
+| `0x01` | `CONNECT_REQ` | Client -> Server | `!16sI` (`session_token`, `connect_nonce`) |
+| `0x02` | `CONNECT_ACK` | Server -> Client | `!HI16sI` (`client_id`, `connection_epoch`, `session_token`, `connect_nonce`) |
+| `0x03` | `DISCONNECT` | Either | Epoch-wrapped reason or handshake cancel payload |
+| `0x04` | `INPUT` | Client -> Server | `!I` epoch + `!B` count + `N * !IffB` inputs |
+| `0x05` | `SNAPSHOT` | Server -> Client | `!I` epoch + `!IH + N * !HfffffH + !Idf` |
+| `0x06` | `PING` | Client -> Server | `!I` epoch + `!d` client timestamp |
+| `0x07` | `PONG` | Server -> Client | `!I` epoch + `!d` echoed timestamp |
+| `0x08` | `RELIABLE_EVENT` | Either | `!I` epoch + event-specific reliable payload |
+| `0x09` | `HEARTBEAT` | Either | `!I` epoch |
+| `0x0A` | `SECURE_HELLO` | Client -> Server | `!B16s32s` (`version`, `client_nonce`, `client_proof`) |
+| `0x0B` | `SECURE_HELLO_ACK` | Server -> Client | `!B16s32s` (`version`, `server_nonce`, `server_proof`) |
+
+After `SECURE_HELLO_ACK`, `CONNECT_REQ`, `CONNECT_ACK`, `DISCONNECT`, `INPUT`,
+`SNAPSHOT`, `PING`, `PONG`, `RELIABLE_EVENT`, and `HEARTBEAT` are encrypted.
+Only the 15-byte packet header stays plaintext; the encrypted payload format is:
+
+```text
+nonce(12) + ciphertext_and_tag
+```
+
+The header bytes are passed to AEAD as additional authenticated data.
+
+### Reliable Event Types
+
+| Byte | Name | Direction | Payload |
 |------|------|-----------|---------|
-| `0x01` | CONNECT_REQ | Client → Server | Join request |
-| `0x02` | CONNECT_ACK | Server → Client | Accept + assign ID |
-| `0x03` | DISCONNECT | Either | Graceful leave |
-| `0x04` | INPUT | Client → Server | Player input (with redundancy) |
-| `0x05` | SNAPSHOT | Server → Client | World state broadcast |
-| `0x06` | PING | Client → Server | Latency probe |
-| `0x07` | PONG | Server → Client | Latency echo |
-| `0x08` | RELIABLE_EVENT | Either | Guaranteed-delivery events |
-| `0x09` | HEARTBEAT | Either | Keep-alive signal |
+| `0x01` | `JOIN` | Server -> Client | `!BH` |
+| `0x02` | `LEAVE` | Server -> Client | `!BH` |
+| `0x03` | `GAME_START` | Client -> Server request, Server -> Client broadcast | `!BH` |
+| `0x04` | `SCORE_UPDATE` | Server -> Client | `!BHH` |
+| `0x05` | `SCORE_SYNC` | Server -> Client | `!B` + repeated `!HH` pairs |
+| `0x06` | `MATCH_OVER` | Server -> Client | `!BH` |
+| `0x07` | `MATCH_RESET` | Server -> Client | `!B` |
+| `0x08` | `KICK_PLAYER` | Client -> Server request | `!BH` |
+| `0x09` | `KICKED` | Server -> Client | `!BH` |
 
----
+For the full wire format, see `docs/protocol_spec.md`.
 
-## Stress Test Results
+## Network Simulation
 
-Tested on a single machine (localhost) with Python 3.14:
+Both server and client support synthetic bad-network testing:
 
-| Clients | Connected | Server Ticks | Snapshots/Client | Server Sent | Avg Tick Time |
-|---------|-----------|-------------|------------------|-------------|---------------|
-| 2 | 2 | 69 | 62.0 | 7.5 KB | 0.019 ms |
-| 4 | 4 | 69 | 62.0 | 25.2 KB | 0.023 ms |
-| 8 | 8 | 69 | 62.0 | 91.2 KB | 0.032 ms |
-| 16 | 16 | 69 | 62.2 | 345.4 KB | 0.041 ms |
+```bash
+multiplayer-engine-server --loss 0.10 --latency 0.05
+multiplayer-engine-client --host 127.0.0.1 --port 9000 --loss 0.02 --latency 0.02
+```
 
-All scenarios maintained sub-0.06 ms tick times with 60+ snapshots delivered per client.
+- `--loss` is packet drop probability (`0.0` to `1.0`)
+- `--latency` is base one-way delay in seconds
 
----
+## Analysis
 
-## Technical Deep Dive
+Metrics JSON files are written under `analysis/logs/`.
 
-### Client-Side Prediction
-The client applies inputs **locally** before the server confirms them. The prediction physics (`client/prediction.py`) is an exact mirror of the server physics (`server/game_state.py`) — same speed constants, same diagonal normalization, same boundary clamping. This ensures prediction errors are minimal (usually zero under ideal conditions).
+```bash
+multiplayer-engine-analyze analysis/logs/server_metrics.json
+```
 
-### Server Reconciliation
-When a snapshot arrives, the client:
-1. Reads the server's `last_processed_input_seq` appended to the snapshot
-2. Discards all pending inputs the server has already processed
-3. Starts from the server's authoritative state
-4. Re-applies any remaining unprocessed inputs
-5. Smooths the visual state toward the corrected state to avoid jarring snaps
+Generated plots:
 
-### Entity Interpolation
-Remote players are rendered **2 ticks behind** the latest server state. The interpolator finds two bracketing snapshots and performs linear interpolation between them, producing smooth motion even at 20 Hz server tick rate.
+- `analysis/network_analysis.png`
+- `analysis/prediction_error_analysis.png`
+- `analysis/bandwidth_analysis.png`
+- `analysis/tick_time_analysis.png`
 
-### Reliability via Redundancy
-Instead of implementing TCP-like reliable delivery (which adds latency), the engine sends the **last 3 inputs** in each packet. If one packet is lost, the next packet still contains the missing data. This provides loss tolerance without adding round-trip latency.
+## Running Tests
 
-### Piggybacked Acknowledgements
-Every packet header carries the sender's latest received remote sequence number plus a 32-bit bitfield encoding receipt of the previous 32 packets. This enables both sides to detect packet loss without dedicated ACK packets.
+```bash
+pytest tests -q
+python tests/stress_test.py
+```
 
----
+The automated suite covers packet encoding, snapshots, prediction,
+reconciliation, GUI scene transitions, reconnect behavior, authoritative game
+state, integration behavior, and duplicate reliable-event suppression.
+
+## Known Limitations
+
+- Hostname validation accepts IPv6-like input, but the runtime resolver currently uses `AF_INET`, so true IPv6 transport is not supported yet.
+- Server-side per-player RTT is inferred from client ping timestamps and is good for UI display, but it is not a perfect per-peer latency model.
+- Score history for players who leave a match is intentionally dropped with their entity; persistent player identity across multiple matches is out of scope.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT. See `LICENSE`.
