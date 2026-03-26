@@ -18,12 +18,10 @@ class ConnectedClient:
         client_id: int,
         address: tuple,
         session_token: str | None = None,
-        session_key: bytes | None = None,
     ):
         self.client_id = client_id
         self.address = address
         self.session_token = session_token or uuid.uuid4().hex[:16]
-        self.session_key = session_key
         self.connection_epoch = 0
         self.last_connect_nonce = 0
         self.last_heard = time.monotonic()
@@ -92,7 +90,6 @@ class ClientManager:
         self,
         address: tuple,
         session_token: str | None = None,
-        session_key: bytes | None = None,
     ) -> ConnectedClient:
         """Register a new client connection and recycle freed IDs safely."""
         client_id = self._next_free_id()
@@ -100,7 +97,6 @@ class ClientManager:
             client_id,
             address,
             session_token=session_token,
-            session_key=session_key,
         )
         self.clients[client_id] = client
         self.addr_to_id[address] = client_id
@@ -112,7 +108,6 @@ class ClientManager:
         client_id: int,
         address: tuple,
         session_token: str,
-        session_key: bytes | None = None,
     ) -> ConnectedClient:
         if client_id in self.clients:
             raise RuntimeError(f"Client ID {client_id} already active")
@@ -121,7 +116,6 @@ class ClientManager:
             client_id,
             address,
             session_token=session_token,
-            session_key=session_key,
         )
         self.clients[client_id] = client
         self.addr_to_id[address] = client_id

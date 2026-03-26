@@ -39,6 +39,7 @@ class SettingsScene(BaseScene):
         super().__init__(manager)
         self.client = client
         self.error_message = ""
+        self.notice_message = ""
         self.panel = Panel(
             (140, 60, 520, 480),
             title="SETTINGS",
@@ -70,6 +71,12 @@ class SettingsScene(BaseScene):
             self._toggle_debug,
             variant="primary",
         )
+        self.clear_hosts_button = Button(
+            (340, 438, 180, 32),
+            "CLEAR TRUST",
+            self._clear_trusted_hosts,
+            variant="ghost",
+        )
 
     def _ordered_fields(self) -> list[TextInput]:
         return list(self.fields.values())
@@ -90,6 +97,8 @@ class SettingsScene(BaseScene):
         ordered_fields[next_index].focus(len(ordered_fields[next_index].text))
 
     def _info_message(self) -> str:
+        if self.notice_message:
+            return self.notice_message
         if self.client.conn_state.name != "DISCONNECTED":
             return (
                 "Host and port apply next session. Name, FPS, buffer, and debug update now."
@@ -148,6 +157,9 @@ class SettingsScene(BaseScene):
         self.debug_button.rect = pygame.Rect(
             field_x, row_start + row_gap * 5, field_width, input_height
         )
+        self.clear_hosts_button.rect = pygame.Rect(
+            field_x, row_start + row_gap * 6, field_width, input_height
+        )
 
         button_width = 150
         button_gap = 20
@@ -175,6 +187,7 @@ class SettingsScene(BaseScene):
         self.show_debug = bool(config.get("show_debug", True))
         self._sync_debug_button()
         self.error_message = ""
+        self.notice_message = ""
         self.fields["host"].focus(len(self.fields["host"].text))
 
     def on_pause(self):
@@ -190,6 +203,16 @@ class SettingsScene(BaseScene):
     def _toggle_debug(self):
         self.show_debug = not self.show_debug
         self._sync_debug_button()
+
+    def _clear_trusted_hosts(self):
+        try:
+            self.client.clear_trusted_hosts()
+        except OSError as exc:
+            self.error_message = f"Could not clear trusted hosts: {exc.strerror or exc}"
+            self.notice_message = ""
+            return
+        self.error_message = ""
+        self.notice_message = "Trusted hosts cleared."
 
     def _validate(self) -> dict | None:
         host = self.fields["host"].text.strip()
@@ -221,6 +244,7 @@ class SettingsScene(BaseScene):
             return None
 
         self.error_message = ""
+        self.notice_message = ""
         return {
             "host": host,
             "port": port,
@@ -274,6 +298,7 @@ class SettingsScene(BaseScene):
         self.save_button.handle_event(event)
         self.cancel_button.handle_event(event)
         self.debug_button.handle_event(event)
+        self.clear_hosts_button.handle_event(event)
 
     def draw(self, surface: pygame.Surface):
         self._layout(surface)
@@ -317,6 +342,17 @@ class SettingsScene(BaseScene):
             size=16,
         ).draw(surface)
         self.debug_button.draw(surface)
+        Label(
+            (
+                self.panel.rect.x + 34,
+                self.clear_hosts_button.rect.y + self.clear_hosts_button.rect.height // 2,
+                180,
+                20,
+            ),
+            "Trusted Hosts",
+            size=16,
+        ).draw(surface)
+        self.clear_hosts_button.draw(surface)
         self.save_button.draw(surface)
         self.cancel_button.draw(surface)
 

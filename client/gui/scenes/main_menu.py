@@ -9,7 +9,6 @@ import time
 
 import pygame
 
-from common.net import detect_lan_ipv4
 from client.gui.scene_manager import BaseScene
 from client.gui.theme import (
     THEME,
@@ -302,9 +301,8 @@ class MainMenuScene(BaseScene):
         self.client.apply_settings(self._settings)
         self.client.begin_new_session()
         self.client.set_room_key(room_key)
-        lan_ip = detect_lan_ipv4("0.0.0.0")
-        self.client.server_host = lan_ip
-        self.client.server_addr = (lan_ip, self.client.server_port)
+        self.client.server_host = "127.0.0.1"
+        self.client.server_addr = ("127.0.0.1", self.client.server_port)
         self.client.host_mode = True
 
         self._stop_host_server()
@@ -445,7 +443,7 @@ class MainMenuScene(BaseScene):
             draw_status_banner(
                 surface,
                 banner_rect or pygame.Rect(center_x - 210, height - 130, 420, 42),
-                f"Starting secure LAN host on 0.0.0.0:{self.client.server_port}...",
+                f"Starting DTLS LAN host on 0.0.0.0:{self.client.server_port}...",
                 THEME["text_accent"],
                 size=14,
             )

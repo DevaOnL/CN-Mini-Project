@@ -5,20 +5,21 @@
 `multiplayer-engine` is a Python 3.10+ real-time multiplayer arena demo built on
 raw UDP sockets and `pygame-ce`. It demonstrates an authoritative server,
 client-side prediction, reconciliation, interpolation, reconnectable session
-tokens, a mandatory room-key-secured UDP transport layer, a scene-based GUI,
+tokens, a DTLS-secured UDP transport layer, a scene-based GUI,
 reliable gameplay events, and lightweight network analysis tooling.
 
 Tech stack:
 
 - Python 3.10+
 - Raw UDP sockets with a custom binary protocol
-- App-layer authenticated encryption over UDP (`cryptography`, ChaCha20-Poly1305)
+- DTLS over UDP (`pyOpenSSL`) with self-signed host certificates
+- TOFU host fingerprint pinning plus app-level room-key authorization
 - `pygame-ce` for the client GUI and renderer
 - `matplotlib` + `numpy` for metrics analysis
 
 ## Architecture
 
-**Protocol layer** - `common/packet.py`, `common/net.py`, `common/security.py`, `common/snapshot.py`, and `common/config.py` define the 15-byte UDP header, secure hello handshake, encrypted payload framing, ack/bitfield logic, snapshot encoding, reconnect tokens, and shared runtime constants. Reliable events ride on top of normal UDP packets using retransmission and duplicate suppression.
+**Protocol layer** - `common/packet.py`, `common/net.py`, `common/dtls.py`, `common/snapshot.py`, and `common/config.py` define the 15-byte gameplay packet header, DTLS transport/session handling, certificate generation, trusted-host pinning, ack/bitfield logic, snapshot encoding, reconnect tokens, and shared runtime constants. Reliable events ride on top of normal UDP packets using retransmission and duplicate suppression.
 
 **Server loop** - `server/server.py`, `server/game_state.py`, `server/client_manager.py`, and `server/session_manager.py` implement the authoritative fixed-tick simulation. The server owns movement, dash cooldowns, collision damage, respawns, scoring, match win detection, reconnect/session mapping, and snapshot broadcast cadence.
 
@@ -48,7 +49,7 @@ Run the client:
 multiplayer-engine-client
 ```
 
-Host + join from two terminals:
+Headless host + join from two terminals:
 
 ```bash
 # Terminal 1
@@ -60,8 +61,10 @@ multiplayer-engine-client --headless --host 127.0.0.1 --port 9000 --room-key "sh
 
 You can also host directly from the GUI main menu. GUI host and join now both
 require a room key, and GUI-hosted servers bind to `0.0.0.0` so a second
-device on the same LAN can join with the shown LAN IPv4 address plus the shared
-room key.
+device on the same LAN can join with the shown LAN IPv4 address, shared room
+key, and DTLS host fingerprint. The first successful join stores the host
+fingerprint locally; later certificate changes are rejected until the trusted
+host entry is cleared from Settings.
 
 ## Gameplay
 
@@ -115,27 +118,33 @@ stays in memory only for the current process/session.
 
 | Byte | Name | Direction | Payload Summary |
 |------|------|-----------|-----------------|
-| `0x01` | `CONNECT_REQ` | Client -> Server | `!16sI` (`session_token`, `connect_nonce`) |
+| `0x01` | `CONNECT_REQ` | Client -> Server | `!16sIB + room_key_utf8` (`session_token`, `connect_nonce`, `room_key_len`, `room_key`) |
 | `0x02` | `CONNECT_ACK` | Server -> Client | `!HI16sI` (`client_id`, `connection_epoch`, `session_token`, `connect_nonce`) |
-| `0x03` | `DISCONNECT` | Either | Epoch-wrapped reason or handshake cancel payload |
+| `0x03` | `DISCONNECT` | Either | `!B` reason, epoch-wrapped once a connection is established |
 | `0x04` | `INPUT` | Client -> Server | `!I` epoch + `!B` count + `N * !IffB` inputs |
 | `0x05` | `SNAPSHOT` | Server -> Client | `!I` epoch + `!IH + N * !HfffffH + !Idf` |
 | `0x06` | `PING` | Client -> Server | `!I` epoch + `!d` client timestamp |
 | `0x07` | `PONG` | Server -> Client | `!I` epoch + `!d` echoed timestamp |
 | `0x08` | `RELIABLE_EVENT` | Either | `!I` epoch + event-specific reliable payload |
 | `0x09` | `HEARTBEAT` | Either | `!I` epoch |
-| `0x0A` | `SECURE_HELLO` | Client -> Server | `!B16s32s` (`version`, `client_nonce`, `client_proof`) |
-| `0x0B` | `SECURE_HELLO_ACK` | Server -> Client | `!B16s32s` (`version`, `server_nonce`, `server_proof`) |
 
-After `SECURE_HELLO_ACK`, `CONNECT_REQ`, `CONNECT_ACK`, `DISCONNECT`, `INPUT`,
-`SNAPSHOT`, `PING`, `PONG`, `RELIABLE_EVENT`, and `HEARTBEAT` are encrypted.
-Only the 15-byte packet header stays plaintext; the encrypted payload format is:
+### Transport Security
 
-```text
-nonce(12) + ciphertext_and_tag
-```
+All gameplay packets travel inside DTLS datagrams. The custom 15-byte header is
+still part of the gameplay packet format, but it is now protected by DTLS
+instead of the old app-layer secure-hello flow.
 
-The header bytes are passed to AEAD as additional authenticated data.
+Server security defaults:
+
+- the host auto-generates a self-signed ECDSA certificate the first time it runs
+- the cert/key are stored under `~/.multiplayer_engine/certs/`
+- the lobby shows the SHA-256 fingerprint so players can verify the host
+
+Client trust model:
+
+- first successful connection silently trusts and stores `host:port -> fingerprint`
+- later fingerprint changes are rejected before `CONNECT_REQ`
+- Settings includes a `Clear Trusted Hosts` action for local recovery
 
 ### Reliable Event Types
 
@@ -188,8 +197,9 @@ python tests/stress_test.py
 ```
 
 The automated suite covers packet encoding, snapshots, prediction,
-reconciliation, GUI scene transitions, reconnect behavior, authoritative game
-state, integration behavior, and duplicate reliable-event suppression.
+reconciliation, GUI scene transitions, DTLS certificate/pinning behavior,
+reconnect behavior, authoritative game state, integration behavior, and
+duplicate reliable-event suppression.
 
 ## Known Limitations
 

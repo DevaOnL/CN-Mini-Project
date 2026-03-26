@@ -26,11 +26,11 @@ from common.packet import (
     DISCONNECT_REASON_FORMAT,
     DISCONNECT_REASON_NONE,
     DISCONNECT_REASON_KICKED,
-    HANDSHAKE_DISCONNECT_FORMAT,
     pack_connection_epoch,
 )
 from common.snapshot import EntityState, Snapshot
 from server.server import ReliableChannel as ServerReliableChannel
+from server.server import GameServer
 
 
 def test_ack_tracker_detects_duplicate_packet():
@@ -233,15 +233,15 @@ def test_client_ignores_packets_from_unexpected_sender():
         client.disconnect(close_socket=True)
 
 
-def test_connect_does_not_replace_pending_secure_nonce_within_retry_window():
+def test_connect_does_not_replace_pending_dtls_transport_within_retry_window():
     client = GameClient(headless=True, room_key="shared-key")
     try:
         assert client.connect() is True
-        first_nonce = client._pending_secure_client_nonce
+        first_transport = client._dtls_transport
 
-        assert first_nonce is not None
+        assert first_transport is not None
         assert client.connect() is True
-        assert client._pending_secure_client_nonce == first_nonce
+        assert client._dtls_transport is first_transport
     finally:
         client.disconnect(close_socket=True)
 
@@ -313,6 +313,36 @@ def test_reliable_channel_queues_packets_when_window_full():
         channel.ack(1)
 
         assert sent_sequences == [1, 2, 3, 4, 5]
+
+
+def test_server_client_bytes_sent_tracks_dtls_packets_and_reliable_retries():
+    server = GameServer(port=0, verbose=False, room_key="shared-key")
+    try:
+        client = server.client_mgr.add_client(("127.0.0.1", 9000))
+        sent_packets = []
+
+        server._send_transport_bytes = (  # type: ignore[method-assign]
+            lambda addr, data: sent_packets.append((addr, data)) or True
+        )
+
+        assert server._send_client_packet(client, PacketType.HEARTBEAT) is True
+        assert client.bytes_sent == len(sent_packets[0][1])
+
+        reliable_payload = struct.pack(RELIABLE_EVENT_FORMAT, RELIABLE_EVENT_GAME_START, 0)
+        seq = server._send_reliable_payload(client, reliable_payload)
+        assert seq >= 0
+
+        channel = server._get_reliable_channel(client)
+        entry = channel._pending[seq]
+        entry["last_sent"] -= channel.RETRY_INTERVAL
+        channel.tick()
+
+        reliable_lengths = [len(data) for addr, data in sent_packets[1:]]
+        assert len(reliable_lengths) >= 2
+        assert client.bytes_sent == len(sent_packets[0][1]) + sum(reliable_lengths)
+    finally:
+        server.sock.close()
+        server.dtls_transport.close()
 
 
 def test_request_game_start_succeeds_when_reliable_window_is_full():
@@ -632,7 +662,7 @@ def test_disconnect_bypasses_network_simulator_queue():
             pass
 
 
-def test_handshake_disconnect_with_token_retries_as_fresh_join():
+def test_connecting_disconnect_with_token_retries_as_fresh_join():
     client = GameClient(headless=True)
     try:
         retry_calls = []
@@ -649,12 +679,7 @@ def test_handshake_disconnect_with_token_retries_as_fresh_join():
 
         packet = Packet(
             PacketType.DISCONNECT,
-            payload=struct.pack(
-                HANDSHAKE_DISCONNECT_FORMAT,
-                b"\x00" * 16,
-                client.connect_nonce,
-                DISCONNECT_REASON_NONE,
-            ),
+            payload=struct.pack(DISCONNECT_REASON_FORMAT, DISCONNECT_REASON_NONE),
         )
 
         client._handle_packet(packet.serialize(), client.server_addr)
@@ -722,7 +747,7 @@ def test_fixed_tick_advance_pauses_when_gameplay_input_disabled():
 
 
 def test_connect_treats_wildcard_host_as_local_loopback():
-    client = GameClient(server_host="0.0.0.0", headless=True)
+    client = GameClient(server_host="0.0.0.0", headless=True, room_key="shared-key")
     try:
         assert client.connect() is True
         assert client.server_addr == ("127.0.0.1", client.server_port)
@@ -733,7 +758,7 @@ def test_connect_treats_wildcard_host_as_local_loopback():
 
 def test_connect_uses_loopback_for_local_hostname_without_dns(monkeypatch):
     hostname = "my-workstation"
-    client = GameClient(server_host=hostname, headless=True)
+    client = GameClient(server_host=hostname, headless=True, room_key="shared-key")
     try:
         monkeypatch.setattr("client.client._socket.gethostname", lambda: hostname)
         monkeypatch.setattr("client.client._socket.getfqdn", lambda: hostname)

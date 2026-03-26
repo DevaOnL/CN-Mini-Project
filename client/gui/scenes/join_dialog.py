@@ -151,16 +151,17 @@ class JoinDialogScene(BaseScene):
             return
 
         room_key = self.room_key_input.text.strip()
-        # Room key is optional - only set if provided
+        if not room_key:
+            self.error_message = "Room key is required."
+            return
 
         self.error_message = ""
         self._blur_all_fields()
         self.client.begin_new_session()
-        if room_key:  # Only set room key if user provided one
-            if hasattr(self.client, "set_room_key"):
-                self.client.set_room_key(room_key)
-            else:
-                self.client.room_key = room_key
+        if hasattr(self.client, "set_room_key"):
+            self.client.set_room_key(room_key)
+        else:
+            self.client.room_key = room_key
         self.client.server_host = host
         self.client.server_port = port
         self.client.server_addr = (host, port)
@@ -228,7 +229,7 @@ class JoinDialogScene(BaseScene):
 
         draw_wrapped_text(
             surface,
-            "Use 127.0.0.1 for the same PC.",
+            "Use 127.0.0.1 for the same PC. The room key is checked after the DTLS handshake.",
             self._hint_rect(),
             THEME["text_dim"],
             size=13,

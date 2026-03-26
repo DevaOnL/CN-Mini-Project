@@ -79,11 +79,15 @@ class LobbyScene(BaseScene):
 
         button_w = self.right_panel.rect.width - 44
         button_x = self.right_panel.rect.x + 22
+        action_top = min(
+            self.right_panel.rect.y + 220,
+            self.right_panel.rect.bottom - 170,
+        )
         self.start_button.rect = pygame.Rect(
-            button_x, self.right_panel.rect.y + 184, button_w, 42
+            button_x, action_top, button_w, 42
         )
         self.kick_button.rect = pygame.Rect(
-            button_x, self.right_panel.rect.y + 238, button_w, 42
+            button_x, action_top + 54, button_w, 42
         )
         self.back_button.rect = pygame.Rect(
             button_x, self.right_panel.rect.bottom - 64, button_w, 42
@@ -387,12 +391,30 @@ class LobbyScene(BaseScene):
             size=13,
             align="left",
         )
-        room_key = getattr(self.client, "room_key", "")
-        secure_label = "Secure room key set" if room_key else "Room key missing"
-        secure_color = THEME["text_accent"] if room_key else THEME["dot_disconnected"]
+        secure_label = "DTLS secured"
         surface.blit(
-            get_font(12, bold=True).render(secure_label, True, secure_color),
+            get_font(12, bold=True).render(secure_label, True, THEME["text_accent"]),
             (self.right_panel.rect.x + 22, self.right_panel.rect.y + 150),
+        )
+        surface.blit(
+            get_font(12).render("Room key required", True, THEME["text_dim"]),
+            (self.right_panel.rect.x + 22, self.right_panel.rect.y + 168),
+        )
+        fingerprint = (
+            self.client.server_certificate_fingerprint or "Fingerprint pending..."
+        )
+        draw_wrapped_text(
+            surface,
+            f"Fingerprint {fingerprint}",
+            pygame.Rect(
+                self.right_panel.rect.x + 22,
+                self.right_panel.rect.y + 188,
+                self.right_panel.rect.width - 44,
+                max(28, self.start_button.rect.y - (self.right_panel.rect.y + 188) - 12),
+            ),
+            THEME["text_dim"],
+            size=11,
+            align="left",
         )
         self._draw_status_banner(surface)
 

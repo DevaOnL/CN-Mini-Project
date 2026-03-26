@@ -1,141 +1,115 @@
-"""Secure UDP handshake and payload protection tests."""
+"""DTLS certificate, pinning, and transport tests."""
 
-import struct
-import time
+from __future__ import annotations
 
-from common.packet import (
-    Packet,
-    PacketType,
-    DISCONNECT_REASON_AUTH_FAILED,
-    DISCONNECT_REASON_SECURE_REQUIRED,
-    HANDSHAKE_DISCONNECT_FORMAT,
+from common.dtls import (
+    DtlsClientTransport,
+    DtlsServerTransport,
+    clear_known_hosts,
+    ensure_server_certificate,
+    load_known_hosts,
+    verify_or_trust_host,
 )
-from common.security import (
-    PendingSecureHandshake,
-    SECURE_HELLO_FORMAT,
-    SECURE_PROTOCOL_VERSION,
-    build_client_proof,
-    build_server_proof,
-    decrypt_payload,
-    derive_room_psk,
-    derive_session_key,
-    encrypt_payload,
-)
-from server.server import CONNECT_REQ_FORMAT, GameServer
+from common.packet import pack_connect_request, unpack_connect_request
 
 
-def test_room_psk_derivation_is_deterministic():
-    assert derive_room_psk("shared secret") == derive_room_psk("shared secret")
-    assert derive_room_psk("shared secret") != derive_room_psk("other secret")
+def _pump_dtls_pair(
+    client: DtlsClientTransport,
+    server: DtlsServerTransport,
+    addr: tuple = ("127.0.0.1", 9999),
+    *,
+    steps: int = 200,
+):
+    for _ in range(steps):
+        client.poll()
+        for datagram in client.drain_outbound():
+            server.receive_datagram(addr, datagram)
+
+        server.poll()
+        for server_addr, datagram in server.drain_outbound():
+            assert server_addr == addr
+            client.feed_datagram(datagram)
+
+        if client.handshake_complete and server.handshake_complete(addr):
+            return
+
+    raise AssertionError("DTLS handshake did not complete in time.")
 
 
-def test_server_proof_validation_depends_on_room_key():
-    correct_psk = derive_room_psk("alpha")
-    wrong_psk = derive_room_psk("beta")
-    client_nonce = b"c" * 16
-    server_nonce = b"s" * 16
+def test_server_certificate_generation_is_stable(tmp_path):
+    cert_file = tmp_path / "server_cert.pem"
+    key_file = tmp_path / "server_key.pem"
 
-    proof = build_server_proof(correct_psk, client_nonce, server_nonce)
+    first = ensure_server_certificate(cert_file, key_file, common_name="test-host")
+    second = ensure_server_certificate(cert_file, key_file, common_name="ignored")
 
-    assert proof == build_server_proof(correct_psk, client_nonce, server_nonce)
-    assert proof != build_server_proof(wrong_psk, client_nonce, server_nonce)
-
-
-def test_secure_payload_round_trip_rejects_tampering():
-    psk = derive_room_psk("round-trip")
-    session_key = derive_session_key(psk, b"a" * 16, b"b" * 16)
-    header = Packet.pack_header(7, 0, 0, PacketType.SNAPSHOT, len(b"payload") + 28)
-    encrypted = encrypt_payload(session_key, header, b"payload", nonce=b"0" * 12)
-
-    assert decrypt_payload(session_key, header, encrypted) == b"payload"
-
-    tampered_header = bytearray(header)
-    tampered_header[-1] ^= 0x01
-    try:
-        decrypt_payload(session_key, bytes(tampered_header), encrypted)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("Header tampering should fail authentication")
-
-    tampered_payload = bytearray(encrypted)
-    tampered_payload[-1] ^= 0x01
-    try:
-        decrypt_payload(session_key, header, bytes(tampered_payload))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("Payload tampering should fail authentication")
+    assert cert_file.exists()
+    assert key_file.exists()
+    assert first.fingerprint == second.fingerprint
 
 
-def test_expired_pending_secure_handshake_is_pruned():
-    server = GameServer(port=0, verbose=False, room_key="expiry-check")
-    try:
-        addr = ("127.0.0.1", 9999)
-        server.pending_secure_handshakes[addr] = PendingSecureHandshake(
-            client_nonce=b"c" * 16,
-            server_nonce=b"s" * 16,
-            session_key=b"k" * 32,
-            expires_at=time.monotonic() - 0.01,
-        )
+def test_trusted_host_store_records_and_rejects_mismatch(tmp_path):
+    known_hosts_path = tmp_path / "known_hosts.json"
 
-        assert server._get_pending_secure_handshake(addr) is None
-        assert addr not in server.pending_secure_handshakes
-    finally:
-        server.sock.close()
+    assert verify_or_trust_host(
+        "127.0.0.1",
+        9000,
+        "AA" * 32,
+        path=known_hosts_path,
+    ) is None
+    assert load_known_hosts(known_hosts_path) == {
+        "127.0.0.1:9000": ":".join(["AA"] * 32)
+    }
 
+    assert verify_or_trust_host(
+        "127.0.0.1",
+        9000,
+        "AA" * 32,
+        path=known_hosts_path,
+    ) is None
 
-def test_secure_server_rejects_legacy_cleartext_connect_req():
-    server = GameServer(port=0, verbose=False, room_key="secure-only")
-    sent_packets = []
+    mismatch = verify_or_trust_host(
+        "127.0.0.1",
+        9000,
+        "BB" * 32,
+        path=known_hosts_path,
+    )
+    assert mismatch is not None
+    assert "Trusted host changed" in mismatch
 
-    def capture(data, addr):
-        sent_packets.append((data, addr))
-
-    server._sendto_immediate = capture
-    try:
-        payload = struct.pack(CONNECT_REQ_FORMAT, b"\x00" * 16, 55)
-        pkt = Packet(PacketType.CONNECT_REQ, payload=payload)
-
-        server._handle_packet(pkt.serialize(), ("127.0.0.1", 9001))
-
-        response, _addr = sent_packets[0]
-        disconnect = Packet.deserialize(response)
-        assert disconnect.packet_type == PacketType.DISCONNECT
-        _token, connect_nonce, reason_code = struct.unpack(
-            HANDSHAKE_DISCONNECT_FORMAT,
-            disconnect.payload[: struct.calcsize(HANDSHAKE_DISCONNECT_FORMAT)],
-        )
-        assert connect_nonce == 55
-        assert reason_code == DISCONNECT_REASON_SECURE_REQUIRED
-    finally:
-        server.sock.close()
+    clear_known_hosts(known_hosts_path)
+    assert load_known_hosts(known_hosts_path) == {}
 
 
-def test_secure_hello_with_wrong_key_returns_auth_failed():
-    server = GameServer(port=0, verbose=False, room_key="right-key")
-    sent_packets = []
+def test_connect_request_round_trip_and_malformed_lengths():
+    payload = pack_connect_request("reconnect-token", 17, "shared-room")
 
-    def capture(data, addr):
-        sent_packets.append((data, addr))
+    assert unpack_connect_request(payload) == ("reconnect-token", 17, "shared-room")
+    assert unpack_connect_request(payload[:-1]) is None
+    assert unpack_connect_request(payload + b"\x00") is None
 
-    server._sendto_immediate = capture
-    try:
-        client_nonce = b"n" * 16
-        wrong_psk = derive_room_psk("wrong-key")
-        payload = struct.pack(
-            SECURE_HELLO_FORMAT,
-            SECURE_PROTOCOL_VERSION,
-            client_nonce,
-            build_client_proof(wrong_psk, client_nonce),
-        )
-        pkt = Packet(PacketType.SECURE_HELLO, payload=payload)
 
-        server._handle_packet(pkt.serialize(), ("127.0.0.1", 9002))
+def test_dtls_transports_complete_handshake_and_exchange_packets(tmp_path):
+    cert_info = ensure_server_certificate(
+        tmp_path / "server_cert.pem",
+        tmp_path / "server_key.pem",
+        common_name="dtls-test",
+    )
+    server = DtlsServerTransport(cert_info.cert_file, cert_info.key_file)
+    client = DtlsClientTransport()
+    client.start()
 
-        response, _addr = sent_packets[0]
-        disconnect = Packet.deserialize(response)
-        assert disconnect.packet_type == PacketType.DISCONNECT
-        assert disconnect.payload[-1] == DISCONNECT_REASON_AUTH_FAILED
-    finally:
-        server.sock.close()
+    _pump_dtls_pair(client, server)
+
+    assert client.handshake_complete is True
+    assert server.handshake_complete(("127.0.0.1", 9999)) is True
+    assert client.peer_fingerprint() == cert_info.fingerprint
+
+    client.send_packet(b"hello")
+    _pump_dtls_pair(client, server)
+    server_packets = server.drain_packets()
+    assert server_packets == [(("127.0.0.1", 9999), b"hello")]
+
+    server.send_packet(("127.0.0.1", 9999), b"world")
+    _pump_dtls_pair(client, server)
+    assert client.drain_packets() == [b"world"]

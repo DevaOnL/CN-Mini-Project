@@ -81,10 +81,12 @@ class HostDialogScene(BaseScene):
 
     def _start_host(self):
         room_key = self.room_key_input.text.strip()
-        # Room key is optional - if left empty, host will run unsecured
+        if not room_key:
+            self.error_message = "Room key is required."
+            return
 
         self._blur_all_fields()
-        error = self.on_submit(room_key)  # Pass even if empty string
+        error = self.on_submit(room_key)
         if error:
             self.error_message = error
             return
@@ -131,7 +133,7 @@ class HostDialogScene(BaseScene):
 
         draw_wrapped_text(
             surface,
-            f"Players join with {lan_ip}:{self.client.server_port} and this room key.",
+            f"Players join with {lan_ip}:{self.client.server_port}, this room key, and the DTLS host fingerprint shown in the lobby.",
             pygame.Rect(
                 self.panel.rect.x + 28,
                 self.panel.rect.bottom - 146,

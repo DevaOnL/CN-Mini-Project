@@ -20,39 +20,23 @@ from collections import deque
 from common.packet import (
     Packet,
     PacketType,
-    HEADER_SIZE,
+    CONNECTION_EPOCH_SIZE,
     INPUT_FORMAT,
     INPUT_SIZE,
     PING_FORMAT,
     PING_SIZE,
-    packet_requires_encryption,
+    CONNECT_TOKEN_SIZE,
+    unpack_connect_request,
     packet_uses_connection_epoch,
     pack_connection_epoch,
     unpack_connection_epoch,
-    HANDSHAKE_DISCONNECT_FORMAT,
-    HANDSHAKE_DISCONNECT_SIZE,
     DISCONNECT_REASON_FORMAT,
     DISCONNECT_REASON_NONE,
     DISCONNECT_REASON_KICKED,
-    DISCONNECT_REASON_SECURE_REQUIRED,
     DISCONNECT_REASON_AUTH_FAILED,
 )
+from common.dtls import DtlsServerTransport, ensure_server_certificate
 from common.net import create_server_socket, NetworkSimulator
-from common.security import (
-    PendingSecureHandshake,
-    SECURE_PROTOCOL_VERSION,
-    SECURE_HELLO_ACK_FORMAT,
-    SECURE_HELLO_FORMAT,
-    SECURE_HELLO_SIZE,
-    SECURE_HANDSHAKE_TIMEOUT_SECS,
-    build_server_proof,
-    decrypt_payload,
-    derive_room_psk,
-    derive_session_key,
-    encrypt_payload,
-    generate_handshake_nonce,
-    verify_client_proof,
-)
 from common.config import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -69,9 +53,6 @@ from server.game_state import GameState
 from server.client_manager import ClientManager, ConnectedClient
 from server.session_manager import SessionManager, SessionState
 
-
-CONNECT_TOKEN_SIZE = 16
-CONNECT_REQ_FORMAT = f"!{CONNECT_TOKEN_SIZE}sI"
 CONNECT_ACK_FORMAT = f"!HI{CONNECT_TOKEN_SIZE}sI"
 SNAPSHOT_TRAILER_FORMAT = "!IdfH"
 SNAPSHOT_TRAILER_SIZE = struct.calcsize(SNAPSHOT_TRAILER_FORMAT)
@@ -192,6 +173,8 @@ class GameServer:
         latency_sim: float = 0.0,
         verbose: bool = True,
         room_key: str | None = None,
+        cert_file: str | None = None,
+        key_file: str | None = None,
     ):
         self.host = host
         self.port = port
@@ -230,20 +213,20 @@ class GameServer:
         self.current_tick = 0
         self.total_bytes_sent = 0
         self.total_bytes_recv = 0
-        self.room_key = ""
-        self._room_psk: bytes | None = None
-        self.pending_secure_handshakes: dict[tuple, PendingSecureHandshake] = {}
-        self.set_room_key(room_key)
-
-    @property
-    def secure_required(self) -> bool:
-        return self._room_psk is not None
-
-    def set_room_key(self, room_key: str | None):
         normalized = (room_key or "").strip()
+        if not normalized:
+            raise ValueError("Room key is required for DTLS sessions.")
         self.room_key = normalized
-        self._room_psk = derive_room_psk(normalized) if normalized else None
-        self.pending_secure_handshakes.clear()
+
+        cert_info = ensure_server_certificate(
+            cert_file,
+            key_file,
+            common_name=host if host not in {"0.0.0.0", "::"} else None,
+        )
+        self.cert_file = cert_info.cert_file
+        self.key_file = cert_info.key_file
+        self.certificate_fingerprint = cert_info.fingerprint
+        self.dtls_transport = DtlsServerTransport(self.cert_file, self.key_file)
 
     def _log(self, msg: str):
         if self.verbose:
@@ -266,10 +249,48 @@ class GameServer:
             pass
         self.total_bytes_sent += len(data)
 
+    def _send_transport_bytes(self, addr: tuple, data: bytes) -> bool:
+        try:
+            self.dtls_transport.send_packet(addr, data)
+        except RuntimeError:
+            return False
+        self._drain_dtls_transport()
+        return True
+
+    def _send_client_packet(
+        self,
+        client: ConnectedClient,
+        packet_type: int,
+        payload: bytes = b"",
+        *,
+        track_send: bool = True,
+    ) -> bool:
+        data, _ = self._make_client_packet(
+            client,
+            packet_type,
+            payload,
+            track_send=track_send,
+        )
+        sent = self._send_transport_bytes(client.address, data)
+        if sent:
+            client.bytes_sent += len(data)
+        return sent
+
+    def _send_reliable_datagram(self, data: bytes, addr: tuple):
+        sent = self._send_transport_bytes(addr, data)
+        if not sent:
+            return
+        client = self.client_mgr.get_by_address(addr)
+        if client is not None:
+            client.bytes_sent += len(data)
+
     def _get_reliable_channel(self, client: ConnectedClient) -> ReliableChannel:
         channel = self.reliable_channels.get(client.client_id)
         if channel is None:
-            channel = ReliableChannel(self._sendto, client.ack_tracker.on_packet_sent)
+            channel = ReliableChannel(
+                self._send_reliable_datagram,
+                client.ack_tracker.on_packet_sent,
+            )
             self.reliable_channels[client.client_id] = channel
         return channel
 
@@ -298,26 +319,18 @@ class GameServer:
         for addr in expired:
             del self.recent_disconnect_addrs[addr]
 
-    def _prune_pending_secure_handshakes(self):
-        now = time.monotonic()
-        expired = [
-            addr
-            for addr, handshake in self.pending_secure_handshakes.items()
-            if handshake.expires_at <= now
-        ]
-        for addr in expired:
-            del self.pending_secure_handshakes[addr]
-
-    def _get_pending_secure_handshake(
-        self, addr: tuple
-    ) -> PendingSecureHandshake | None:
-        handshake = self.pending_secure_handshakes.get(addr)
-        if handshake is None:
-            return None
-        if handshake.expires_at <= time.monotonic():
-            del self.pending_secure_handshakes[addr]
-            return None
-        return handshake
+    def _drain_dtls_transport(self):
+        self.dtls_transport.poll()
+        while True:
+            progressed = False
+            for addr, datagram in self.dtls_transport.drain_outbound():
+                self._sendto(datagram, addr)
+                progressed = True
+            for addr, packet_bytes in self.dtls_transport.drain_packets():
+                self._handle_packet(packet_bytes, addr)
+                progressed = True
+            if not progressed:
+                break
 
     def _allocate_connection_epoch(self) -> int:
         epoch = self._next_connection_epoch & 0xFFFFFFFF
@@ -344,14 +357,8 @@ class GameServer:
         sequence: int = 0,
         ack: int = 0,
         ack_bitfield: int = 0,
-        session_key: bytes | None = None,
     ) -> bytes:
         pkt = Packet(packet_type, sequence, ack, ack_bitfield, payload)
-        if packet_requires_encryption(packet_type) and session_key is not None:
-            encrypted_length = len(payload) + 28
-            header = pkt.serialize_header(encrypted_length)
-            encrypted_payload = encrypt_payload(session_key, header, payload)
-            return header + encrypted_payload
         return pkt.serialize()
 
     def _make_client_packet(
@@ -374,27 +381,13 @@ class GameServer:
             sequence=seq,
             ack=client.ack_tracker.remote_sequence,
             ack_bitfield=client.ack_tracker.ack_bitfield,
-            session_key=client.session_key,
         )
         if track_send:
             client.ack_tracker.on_packet_sent(seq)
         return data, seq
 
-    def _parse_connect_request(self, payload: bytes) -> tuple[str | None, int]:
-        if len(payload) >= struct.calcsize(CONNECT_REQ_FORMAT):
-            raw, nonce = struct.unpack(
-                CONNECT_REQ_FORMAT,
-                payload[: struct.calcsize(CONNECT_REQ_FORMAT)],
-            )
-            token = raw.decode("ascii", errors="ignore").rstrip("\x00")
-            return token or None, nonce
-
-        if len(payload) >= CONNECT_TOKEN_SIZE:
-            raw = payload[:CONNECT_TOKEN_SIZE]
-            token = raw.decode("ascii", errors="ignore").rstrip("\x00")
-            return token or None, 0
-
-        return None, 0
+    def _parse_connect_request(self, payload: bytes) -> tuple[str | None, int, str] | None:
+        return unpack_connect_request(payload)
 
     def _build_connect_ack_payload(
         self, client: ConnectedClient, connect_nonce: int
@@ -409,27 +402,19 @@ class GameServer:
             connect_nonce,
         )
 
-    def _pending_disconnect_matches_client(
-        self, payload: bytes, client: ConnectedClient
+    def _send_packet_to_addr(
+        self,
+        addr: tuple,
+        packet_type: int,
+        payload: bytes = b"",
     ) -> bool:
-        if len(payload) >= HANDSHAKE_DISCONNECT_SIZE:
-            token_bytes, connect_nonce, _reason_code = struct.unpack(
-                HANDSHAKE_DISCONNECT_FORMAT,
-                payload[:HANDSHAKE_DISCONNECT_SIZE],
-            )
-            token = token_bytes.decode("ascii", errors="ignore").rstrip("\x00")
-            return connect_nonce == client.last_connect_nonce and (
-                not token or token == client.session_token
-            )
-
-        if len(payload) >= struct.calcsize(CONNECT_REQ_FORMAT):
-            reconnect_token, connect_nonce = self._parse_connect_request(payload)
-            return (
-                reconnect_token == client.session_token
-                and connect_nonce == client.last_connect_nonce
-            )
-
-        return False
+        packet_bytes = Packet(packet_type, payload=payload).serialize()
+        try:
+            self.dtls_transport.send_packet(addr, packet_bytes)
+        except RuntimeError:
+            return False
+        self._drain_dtls_transport()
+        return True
 
     def _remove_client(
         self,
@@ -482,7 +467,7 @@ class GameServer:
         self.game_state.remove_entity(client.client_id)
         if not remove_session and preserved_score is not None:
             self.game_state.scores[client.client_id] = preserved_score
-        self.pending_secure_handshakes.pop(client.address, None)
+        self.dtls_transport.remove_peer(client.address)
         self.client_mgr.remove_client(client.client_id)
         active_client_ids = self._active_client_ids()
         if not active_client_ids:
@@ -528,10 +513,7 @@ class GameServer:
             track_send=False,
         )
         channel = self._get_reliable_channel(client)
-        seq = channel.send(data, client.address)
-        if seq >= 0:
-            client.bytes_sent += len(data)
-        return seq
+        return channel.send(data, client.address)
 
     def _send_reliable_event_to_client(
         self, client: ConnectedClient, event_type: int, subject_client_id: int
@@ -544,32 +526,21 @@ class GameServer:
         addr: tuple,
         reason_code: int,
         client: ConnectedClient | None = None,
-        connect_nonce: int = 0,
-        session_key: bytes | None = None,
     ):
+        payload = struct.pack(DISCONNECT_REASON_FORMAT, reason_code)
         if client is not None:
             data, _ = self._make_client_packet(
                 client,
                 PacketType.DISCONNECT,
-                struct.pack(DISCONNECT_REASON_FORMAT, reason_code),
-            )
-        else:
-            payload = struct.pack(DISCONNECT_REASON_FORMAT, reason_code)
-            if connect_nonce and session_key is None:
-                payload = struct.pack(
-                    HANDSHAKE_DISCONNECT_FORMAT,
-                    b"\x00" * CONNECT_TOKEN_SIZE,
-                    connect_nonce,
-                    reason_code,
-                )
-            data = self._serialize_packet(
-                PacketType.DISCONNECT,
                 payload,
-                session_key=session_key,
             )
-        self._sendto_immediate(data, addr)
-        if client is not None:
-            client.bytes_sent += len(data)
+            try:
+                self.dtls_transport.send_packet(addr, data)
+            except RuntimeError:
+                return
+            self._drain_dtls_transport()
+        else:
+            self._send_packet_to_addr(addr, PacketType.DISCONNECT, payload)
 
     def _broadcast_game_start(self):
         for client in self.client_mgr.all_clients():
@@ -637,7 +608,6 @@ class GameServer:
         self._log("[SERVER] Match reset - returning to lobby.")
 
     def receive_all_packets(self):
-        self._prune_pending_secure_handshakes()
         # Use time budget instead of fixed count to prevent packet starvation
         deadline = time.perf_counter() + 0.01  # 10ms max per tick
         packets_processed = 0
@@ -645,12 +615,17 @@ class GameServer:
             try:
                 data, addr = self.sock.recvfrom(DEFAULT_BUFFER_SIZE)
                 self.total_bytes_recv += len(data)
-                self._handle_packet(data, addr)
+                client = self.client_mgr.get_by_address(addr)
+                if client is not None:
+                    client.bytes_received += len(data)
+                self.dtls_transport.receive_datagram(addr, data)
+                self._drain_dtls_transport()
                 packets_processed += 1
             except BlockingIOError:
                 break
             except OSError:
                 break
+        self._drain_dtls_transport()
 
     def _handle_packet(self, data: bytes, addr: tuple):
         try:
@@ -658,73 +633,12 @@ class GameServer:
         except ValueError:
             return
 
-        if pkt.packet_type == PacketType.SECURE_HELLO:
-            self._handle_secure_hello(pkt, addr)
-            return
-
         client = self.client_mgr.get_by_address(addr)
-        pending_secure = self._get_pending_secure_handshake(addr)
-
-        if self.secure_required:
-            if pkt.packet_type == PacketType.CONNECT_REQ and pending_secure is None:
-                if len(pkt.payload) == struct.calcsize(CONNECT_REQ_FORMAT):
-                    _reconnect_token, connect_nonce = self._parse_connect_request(
-                        pkt.payload
-                    )
-                    self._send_disconnect_notice(
-                        addr,
-                        DISCONNECT_REASON_SECURE_REQUIRED,
-                        connect_nonce=connect_nonce,
-                    )
-                return
-            if packet_requires_encryption(pkt.packet_type):
-                allow_cleartext_connect_disconnect = (
-                    pkt.packet_type == PacketType.DISCONNECT
-                    and len(pkt.payload) >= HANDSHAKE_DISCONNECT_SIZE
-                )
-                session_key = None
-                if pkt.packet_type == PacketType.CONNECT_REQ and pending_secure is not None:
-                    session_key = pending_secure.session_key
-                elif client is not None and client.session_key is not None:
-                    session_key = client.session_key
-                elif pending_secure is not None:
-                    session_key = pending_secure.session_key
-
-                if session_key is None:
-                    if allow_cleartext_connect_disconnect:
-                        pass
-                    else:
-                        return
-                else:
-                    try:
-                        pkt.payload = decrypt_payload(
-                            session_key,
-                            data[:HEADER_SIZE],
-                            pkt.payload,
-                        )
-                    except ValueError:
-                        if (
-                            pkt.packet_type == PacketType.DISCONNECT
-                            and (
-                                allow_cleartext_connect_disconnect
-                                or (
-                                    client is not None
-                                    and self._pending_disconnect_matches_client(
-                                        pkt.payload, client
-                                    )
-                                )
-                            )
-                        ):
-                            pass
-                        else:
-                            return
 
         if pkt.packet_type != PacketType.CONNECT_REQ:
             if pkt.packet_type == PacketType.DISCONNECT:
                 if client is not None:
-                    if self._pending_disconnect_matches_client(pkt.payload, client):
-                        pass
-                    else:
+                    if len(pkt.payload) >= CONNECTION_EPOCH_SIZE:
                         unpacked = unpack_connection_epoch(pkt.payload)
                         if unpacked is None:
                             return
@@ -732,7 +646,7 @@ class GameServer:
                         if packet_epoch != client.connection_epoch:
                             return
                         pkt.payload = payload
-                elif len(pkt.payload) < struct.calcsize(CONNECT_REQ_FORMAT):
+                elif len(pkt.payload) < struct.calcsize(DISCONNECT_REASON_FORMAT):
                     return
             elif packet_uses_connection_epoch(pkt.packet_type):
                 if client is None:
@@ -762,7 +676,6 @@ class GameServer:
         if client:
             if client.client_id not in self.pending_kicks:
                 client.touch()
-            client.bytes_received += len(data)
             client.ack_tracker.on_packet_received(pkt.sequence)
 
             # Fix server-side loss metrics: consume the client's ack fields too.
@@ -774,61 +687,33 @@ class GameServer:
         if session and (client is None or client.client_id not in self.pending_kicks):
             session.touch()
 
-    def _handle_secure_hello(self, pkt: Packet, addr: tuple):
-        if not self.secure_required or self._room_psk is None:
-            return
-        if len(pkt.payload) < SECURE_HELLO_SIZE:
-            return
-
-        version, client_nonce, client_proof = struct.unpack(
-            SECURE_HELLO_FORMAT,
-            pkt.payload[:SECURE_HELLO_SIZE],
+    def _send_connect_ack(self, client: ConnectedClient, connect_nonce: int) -> bool:
+        return self._send_client_packet(
+            client,
+            PacketType.CONNECT_ACK,
+            self._build_connect_ack_payload(client, connect_nonce),
         )
-        if version != SECURE_PROTOCOL_VERSION:
-            self._send_disconnect_notice(addr, DISCONNECT_REASON_AUTH_FAILED)
-            return
-        if not verify_client_proof(self._room_psk, client_nonce, client_proof):
-            self._send_disconnect_notice(addr, DISCONNECT_REASON_AUTH_FAILED)
-            return
-
-        server_nonce = generate_handshake_nonce()
-        session_key = derive_session_key(self._room_psk, client_nonce, server_nonce)
-        self.pending_secure_handshakes[addr] = PendingSecureHandshake(
-            client_nonce=client_nonce,
-            server_nonce=server_nonce,
-            session_key=session_key,
-            expires_at=time.monotonic() + SECURE_HANDSHAKE_TIMEOUT_SECS,
-        )
-        payload = struct.pack(
-            SECURE_HELLO_ACK_FORMAT,
-            SECURE_PROTOCOL_VERSION,
-            server_nonce,
-            build_server_proof(self._room_psk, client_nonce, server_nonce),
-        )
-        data = self._serialize_packet(PacketType.SECURE_HELLO_ACK, payload)
-        self._sendto_immediate(data, addr)
 
     def _handle_connect(self, pkt: Packet, addr: tuple):
         self._prune_kicked_tokens()
         self._prune_recent_disconnect_addrs()
-        pending_secure = self._get_pending_secure_handshake(addr)
-        pending_session_key = pending_secure.session_key if pending_secure else None
-        reconnect_token, connect_nonce = self._parse_connect_request(pkt.payload)
+        parsed = self._parse_connect_request(pkt.payload)
+        if parsed is None:
+            return
+        reconnect_token, connect_nonce, room_key = parsed
+
+        if room_key != self.room_key:
+            self._send_disconnect_notice(addr, DISCONNECT_REASON_AUTH_FAILED)
+            return
 
         if not reconnect_token and addr in self.recent_disconnect_addrs:
             return
 
-        if reconnect_token and reconnect_token in self.kicked_tokens:
-            self._send_disconnect_notice(
-                addr,
-                DISCONNECT_REASON_KICKED,
-                connect_nonce=connect_nonce,
-                session_key=pending_session_key,
-            )
-            self.pending_secure_handshakes.pop(addr, None)
+        if connect_nonce == 0:
             return
 
-        if reconnect_token and connect_nonce == 0:
+        if reconnect_token and reconnect_token in self.kicked_tokens:
+            self._send_disconnect_notice(addr, DISCONNECT_REASON_KICKED)
             return
 
         client = self.client_mgr.get_by_address(addr)
@@ -839,13 +724,7 @@ class GameServer:
                     RELIABLE_EVENT_KICKED,
                     self.pending_kicks[client.client_id]["host_id"],
                 )
-                self._send_disconnect_notice(
-                    addr,
-                    DISCONNECT_REASON_KICKED,
-                    connect_nonce=connect_nonce,
-                    session_key=pending_session_key,
-                )
-                self.pending_secure_handshakes.pop(addr, None)
+                self._send_disconnect_notice(addr, DISCONNECT_REASON_KICKED)
                 return
             if connect_nonce and connect_nonce <= client.last_connect_nonce:
                 return
@@ -862,17 +741,8 @@ class GameServer:
                 client.last_connect_nonce = connect_nonce
             if client.connection_epoch == 0:
                 client.connection_epoch = self._allocate_connection_epoch()
-            if pending_session_key is not None:
-                client.session_key = pending_session_key
             client.delay_nonconnect_packets(POST_CONNECT_GUARD_SECS)
-            data, _ = self._make_client_packet(
-                client,
-                PacketType.CONNECT_ACK,
-                self._build_connect_ack_payload(client, connect_nonce),
-            )
-            self._sendto(data, addr)
-            client.bytes_sent += len(data)
-            self.pending_secure_handshakes.pop(addr, None)
+            self._send_connect_ack(client, connect_nonce)
             if self.game_state.game_started:
                 self._send_reliable_event_to_client(
                     client, RELIABLE_EVENT_GAME_START, 0
@@ -893,7 +763,6 @@ class GameServer:
                         session.client_id,
                         addr,
                         reconnect_token,
-                        session_key=pending_session_key,
                     )
                     client.connection_epoch = self._allocate_connection_epoch()
                     client.last_connect_nonce = connect_nonce
@@ -982,14 +851,7 @@ class GameServer:
                     if self.host_client_id is None:
                         self.host_client_id = client.client_id
 
-                    data, _ = self._make_client_packet(
-                        client,
-                        PacketType.CONNECT_ACK,
-                        self._build_connect_ack_payload(client, connect_nonce),
-                    )
-                    self._sendto(data, addr)
-                    client.bytes_sent += len(data)
-                    self.pending_secure_handshakes.pop(addr, None)
+                    self._send_connect_ack(client, connect_nonce)
                     self._broadcast_presence_event(
                         RELIABLE_EVENT_JOIN, client.client_id
                     )
@@ -1020,10 +882,7 @@ class GameServer:
                         self.pending_kicks[client.client_id]["host_id"],
                     )
                     self._send_disconnect_notice(
-                        addr,
-                        DISCONNECT_REASON_KICKED,
-                        connect_nonce=connect_nonce,
-                        session_key=pending_session_key,
+                        addr, DISCONNECT_REASON_KICKED
                     )
                     return
                 if connect_nonce and connect_nonce <= client.last_connect_nonce:
@@ -1031,6 +890,8 @@ class GameServer:
                 old_addr = client.address
                 if self.session_mgr.reconnect(reconnect_token, addr) is None:
                     return
+                if old_addr != addr:
+                    self.dtls_transport.remove_peer(old_addr)
                 self.client_mgr.bind_address(client, addr)
                 self.recent_disconnect_addrs[old_addr] = (
                     time.monotonic() + POST_CONNECT_GUARD_SECS,
@@ -1042,17 +903,8 @@ class GameServer:
                 client.touch()
                 client.connection_epoch = self._allocate_connection_epoch()
                 client.last_connect_nonce = connect_nonce
-                if pending_session_key is not None:
-                    client.session_key = pending_session_key
                 client.delay_nonconnect_packets(POST_CONNECT_GUARD_SECS)
-                data, _ = self._make_client_packet(
-                    client,
-                    PacketType.CONNECT_ACK,
-                    self._build_connect_ack_payload(client, connect_nonce),
-                )
-                self._sendto(data, addr)
-                client.bytes_sent += len(data)
-                self.pending_secure_handshakes.pop(addr, None)
+                self._send_connect_ack(client, connect_nonce)
                 if self.game_state.game_started:
                     self._send_reliable_event_to_client(
                         client, RELIABLE_EVENT_GAME_START, 0
@@ -1065,16 +917,10 @@ class GameServer:
                 self._log(f"[SERVER] Client {client.client_id} reconnected from {addr}")
                 return
 
-            self._send_disconnect_notice(
-                addr,
-                DISCONNECT_REASON_NONE,
-                connect_nonce=connect_nonce,
-                session_key=pending_session_key,
-            )
-            self.pending_secure_handshakes.pop(addr, None)
+            self._send_disconnect_notice(addr, DISCONNECT_REASON_NONE)
             return
 
-        client = self.client_mgr.add_client(addr, session_key=pending_session_key)
+        client = self.client_mgr.add_client(addr)
         client.connection_epoch = self._allocate_connection_epoch()
         client.last_connect_nonce = connect_nonce
         if addr in self.recent_disconnect_addrs:
@@ -1086,14 +932,7 @@ class GameServer:
         if self.host_client_id is None:
             self.host_client_id = client.client_id
 
-        data, _ = self._make_client_packet(
-            client,
-            PacketType.CONNECT_ACK,
-            self._build_connect_ack_payload(client, connect_nonce),
-        )
-        self._sendto(data, addr)
-        client.bytes_sent += len(data)
-        self.pending_secure_handshakes.pop(addr, None)
+        self._send_connect_ack(client, connect_nonce)
         self._broadcast_presence_event(RELIABLE_EVENT_JOIN, client.client_id)
         if self.game_state.game_started:
             self._send_reliable_event_to_client(client, RELIABLE_EVENT_GAME_START, 0)
@@ -1159,11 +998,7 @@ class GameServer:
         rtt_ms = (time.perf_counter() - sent_time) * 1000.0
         client.smoothed_rtt_ms += (rtt_ms - client.smoothed_rtt_ms) * 0.125
 
-        data, _ = self._make_client_packet(
-            client, PacketType.PONG, pkt.payload[:PING_SIZE]
-        )
-        self._sendto(data, addr)
-        client.bytes_sent += len(data)
+        self._send_client_packet(client, PacketType.PONG, pkt.payload[:PING_SIZE])
 
     def _handle_heartbeat(self, addr: tuple):
         client = self.client_mgr.get_by_address(addr)
@@ -1173,9 +1008,7 @@ class GameServer:
             return
 
         # Heartbeats are now real keep-alives instead of a no-op.
-        data, _ = self._make_client_packet(client, PacketType.HEARTBEAT)
-        self._sendto(data, addr)
-        client.bytes_sent += len(data)
+        self._send_client_packet(client, PacketType.HEARTBEAT)
 
     def _handle_reliable_event(self, pkt: Packet, addr: tuple):
         client = self.client_mgr.get_by_address(addr)
@@ -1251,8 +1084,9 @@ class GameServer:
             )
             return
 
-        reconnect_token, connect_nonce = self._parse_connect_request(pkt.payload)
-        if reconnect_token:
+        parsed = self._parse_connect_request(pkt.payload)
+        if parsed is not None:
+            reconnect_token, connect_nonce, _room_key = parsed
             client = self.client_mgr.get_by_token(reconnect_token)
             if client is not None and connect_nonce == client.last_connect_nonce:
                 self._remove_client(
@@ -1262,7 +1096,7 @@ class GameServer:
                 )
                 return
 
-        self.pending_secure_handshakes.pop(addr, None)
+        self.dtls_transport.remove_peer(addr)
 
     def simulate_tick(self):
         tick_start = time.perf_counter()
@@ -1408,15 +1242,13 @@ class GameServer:
                 self.match_elapsed,
                 self.host_client_id or 0,
             )
-            data, _ = self._make_client_packet(client, PacketType.SNAPSHOT, payload)
-            self._sendto(data, client.address)
-            client.bytes_sent += len(data)
+            self._send_client_packet(client, PacketType.SNAPSHOT, payload)
 
     def run(self):
         self.running = True
         self._log(
             f"[SERVER] Started on {self.host}:{self.port} @ {self.tick_rate} Hz "
-            f"(dt={self.dt:.4f}s)"
+            f"(dt={self.dt:.4f}s) | DTLS fingerprint: {self.certificate_fingerprint}"
         )
 
         previous_sigterm = None
@@ -1510,11 +1342,7 @@ class GameServer:
                     client.address,
                     DISCONNECT_REASON_NONE,
                 )
-                self._send_disconnect_notice(
-                    client.address,
-                    DISCONNECT_REASON_NONE,
-                    client=client,
-                )
+            self.dtls_transport.close()
             self.sock.close()
             self.metrics.save("server_metrics.json")
             summary = self.metrics.get_summary()
@@ -1540,11 +1368,23 @@ def main():
     parser.add_argument(
         "--room-key",
         default=None,
-        help="Shared room key for secure UDP sessions",
+        help="Shared room key required after DTLS handshake",
+    )
+    parser.add_argument(
+        "--cert-file",
+        default=None,
+        help="PEM certificate file for DTLS hosting",
+    )
+    parser.add_argument(
+        "--key-file",
+        default=None,
+        help="PEM private key file for DTLS hosting",
     )
     args = parser.parse_args()
 
-    # Room key is optional - server can run secure or unsecured
+    if not (args.room_key or "").strip():
+        parser.error("--room-key is required.")
+
     server = GameServer(
         host=args.host,
         port=args.port,
@@ -1552,6 +1392,8 @@ def main():
         loss_sim=args.loss,
         latency_sim=args.latency,
         room_key=args.room_key,
+        cert_file=args.cert_file,
+        key_file=args.key_file,
     )
     server.run()
 

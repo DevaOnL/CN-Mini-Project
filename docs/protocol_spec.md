@@ -4,7 +4,7 @@
 
 `multiplayer-engine` uses a custom UDP protocol with a fixed 15-byte header,
 authoritative server snapshots, redundant input delivery, piggybacked acks,
-mandatory room-key-secured payload encryption, and reliable
+DTLS transport security, app-level room-key authorization, and reliable
 gameplay/lifecycle events layered on top of raw UDP.
 
 All multi-byte fields use network byte order (big-endian).
@@ -24,79 +24,63 @@ All multi-byte fields use network byte order (big-endian).
 
 | Value | Name | Direction | Payload |
 |-------|------|-----------|---------|
-| `0x01` | `CONNECT_REQ` | Client -> Server | `!16sI` (`session_token`, `connect_nonce`) |
+| `0x01` | `CONNECT_REQ` | Client -> Server | `!16sIB + room_key_utf8` (`session_token`, `connect_nonce`, `room_key_len`, `room_key`) |
 | `0x02` | `CONNECT_ACK` | Server -> Client | `!HI16sI` (`client_id`, `connection_epoch`, `session_token`, `connect_nonce`) |
-| `0x03` | `DISCONNECT` | Either | Disconnect reason or handshake-cancel payload |
+| `0x03` | `DISCONNECT` | Either | Disconnect reason (`!B`), epoch-wrapped after connect |
 | `0x04` | `INPUT` | Client -> Server | `!I` epoch + `!B` count + `N * !IffB` inputs |
 | `0x05` | `SNAPSHOT` | Server -> Client | `!I` epoch + snapshot body + trailer |
 | `0x06` | `PING` | Client -> Server | `!I` epoch + `!d` client timestamp |
 | `0x07` | `PONG` | Server -> Client | `!I` epoch + `!d` echoed client timestamp |
 | `0x08` | `RELIABLE_EVENT` | Either | `!I` epoch + event-specific payload |
 | `0x09` | `HEARTBEAT` | Either | `!I` epoch |
-| `0x0A` | `SECURE_HELLO` | Client -> Server | `!B16s32s` (`version`, `client_nonce`, `client_proof`) |
-| `0x0B` | `SECURE_HELLO_ACK` | Server -> Client | `!B16s32s` (`version`, `server_nonce`, `server_proof`) |
 
-## Secure Handshake
+## DTLS Transport
 
-The transport is secured at the application layer rather than with TCP/TLS or
-DTLS.
+The transport is secured with DTLS over the existing UDP sockets. The custom
+15-byte gameplay packet header and payload format stay the same above DTLS, but
+the old app-layer `SECURE_HELLO` / `SECURE_HELLO_ACK` handshake is gone.
 
-1. Both peers derive a 32-byte PSK from the room key using `Scrypt`.
-2. Client sends `SECURE_HELLO`:
-   - `version(u8)`
-   - `client_nonce(16)`
-   - `client_proof(32) = HMAC-SHA256(psk, b"client" + client_nonce)`
-3. Server verifies the proof, generates `server_nonce(16)`, and replies with
-   `SECURE_HELLO_ACK`:
-   - `version(u8)`
-   - `server_nonce(16)`
-   - `server_proof(32) = HMAC-SHA256(psk, b"server" + client_nonce + server_nonce)`
-4. Both sides derive the per-session packet key with:
+### Host Identity
 
-```text
-HKDF-SHA256(
-  psk,
-  salt = client_nonce + server_nonce,
-  info = b"multiplayer-engine-secure-v1"
-)
-```
+- The host auto-generates a self-signed ECDSA P-256 certificate on first run.
+- Default paths:
+  - `~/.multiplayer_engine/certs/server_cert.pem`
+  - `~/.multiplayer_engine/certs/server_key.pem`
+- The lobby shows the host SHA-256 certificate fingerprint.
 
-The server keeps pending handshake state for 5 seconds, keyed by source
-address, until the encrypted `CONNECT_REQ` arrives.
+### Client Trust Model
 
-## Encrypted Payload Format
+- Clients use TOFU pinning keyed by `host:port`.
+- First successful connection stores the observed fingerprint locally.
+- Later fingerprint changes abort the join before `CONNECT_REQ`.
+- Trusted pins are stored in `~/.multiplayer_engine_known_hosts.json`.
 
-After `SECURE_HELLO_ACK`, the following packet types must be encrypted:
+### Authorization Flow
 
-- `CONNECT_REQ`
-- `CONNECT_ACK`
-- `DISCONNECT`
-- `INPUT`
-- `SNAPSHOT`
-- `PING`
-- `PONG`
-- `RELIABLE_EVENT`
-- `HEARTBEAT`
+1. Client resolves the server address and completes a DTLS handshake.
+2. Client validates or stores the host fingerprint.
+3. Client sends `CONNECT_REQ` inside DTLS with:
+   - `session_token(16 bytes, ASCII, zero padded)`
+   - `connect_nonce(u32)`
+   - `room_key_len(u8)`
+   - `room_key_utf8(room_key_len bytes)`
+4. Server compares the room key to its configured key.
+5. Server replies with `CONNECT_ACK` or `DISCONNECT(AUTH_FAILED)`.
 
-Only the 15-byte packet header stays plaintext. The payload is encoded as:
-
-```text
-nonce(12) + ciphertext_and_tag
-```
-
-Encryption uses `ChaCha20Poly1305`, and the serialized header bytes are passed
-as AEAD additional authenticated data.
+All gameplay packets (`CONNECT_REQ`, `CONNECT_ACK`, `DISCONNECT`, `INPUT`,
+`SNAPSHOT`, `PING`, `PONG`, `RELIABLE_EVENT`, and `HEARTBEAT`) are protected by
+DTLS once the handshake completes.
 
 ## Connection Freshness
 
-All non-handshake gameplay packets are wrapped with a 32-bit `connection_epoch`.
-The server rotates this epoch on successful connect/reconnect so stale packets from
-older sessions can be rejected even if UDP reorders them.
+All gameplay packets after `CONNECT_ACK` are wrapped with a 32-bit
+`connection_epoch`. The server rotates this epoch on successful connect or
+reconnect so stale packets from older sessions can be rejected even if UDP
+reorders them.
 
-`CONNECT_REQ` carries a 32-bit `connect_nonce` so stale reconnect attempts and
-cancel/disconnect messages can be matched to the current handshake attempt.
-Reconnects still use the session token model, but every reconnect must first
-complete a fresh secure hello exchange and derive a fresh packet key.
+`CONNECT_REQ` carries a 32-bit `connect_nonce` so stale reconnect attempts can
+be rejected. Reconnects still use the session-token model, but every reconnect
+must complete a fresh DTLS handshake before sending the new `CONNECT_REQ`.
 
 ## Input Payload
 
@@ -183,32 +167,17 @@ Each reliable-event payload is prefixed by the current `connection_epoch`.
 
 ## Session Token Reconnect Flow
 
-1. Client sends `SECURE_HELLO`.
-2. Server replies with `SECURE_HELLO_ACK`.
-3. Client sends encrypted `CONNECT_REQ` with a zero-padded token (or zeros for
-   first join) plus a fresh `connect_nonce`.
-4. Server replies with encrypted `CONNECT_ACK` containing `client_id`,
-   `connection_epoch`, the 16-byte token, and the echoed `connect_nonce`.
-5. Client stores the token locally.
-6. If the server goes silent, the client reconnects using the stored token and a
-   newer `connect_nonce`, but still performs a fresh secure hello first.
-7. Server matches the token to the prior session, validates the nonce freshness,
+1. Client completes a fresh DTLS handshake.
+2. Client sends `CONNECT_REQ` with the stored token and a newer `connect_nonce`.
+3. Server matches the token to the prior session, validates nonce freshness,
    rotates the `connection_epoch`, rebinds the new `(ip, port)`, and reuses the
    same player identity while rejecting stale packets from the old session.
-
-`DISCONNECT` also has handshake-time variants used before an epoch is fully
-established:
-
-- `!16sIB` (`session_token`, `connect_nonce`, `reason_code`) for handshake-time
-  rejection / cancellation
-- legacy token+nonce `!16sI` disconnect payloads are still accepted for stale
-  reconnect cancellation cleanup
+4. `CONNECT_ACK` returns the same client identity plus the new epoch.
 
 Disconnect reasons now include:
 
 - `0x00` - `NONE`
 - `0x01` - `KICKED`
-- `0x02` - `SECURE_REQUIRED`
 - `0x03` - `AUTH_FAILED`
 
 ## Match Lifecycle

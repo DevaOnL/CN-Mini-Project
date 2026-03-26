@@ -31,6 +31,7 @@ class _DummyClient:
         self.host_server_proc = None
         self.session_token: str | None = None
         self.room_key = ""
+        self.server_certificate_fingerprint: str | None = None
         self.server_snapshots = []
         self.current_rtt = 0.0
         self.current_jitter = 0.0
@@ -49,6 +50,7 @@ class _DummyClient:
         self.pending_inputs = []
         self.match_elapsed = 0.0
         self.last_server_tick = 0
+        self.trusted_hosts_cleared = False
 
     def connect(self):
         self.conn_state = type(self.conn_state).CONNECTING
@@ -66,6 +68,9 @@ class _DummyClient:
 
     def set_room_key(self, room_key):
         self.room_key = room_key
+
+    def clear_trusted_hosts(self):
+        self.trusted_hosts_cleared = True
 
     def stop_host_server(self, wait_timeout: float = 2.0):
         _ = wait_timeout
@@ -311,6 +316,23 @@ def test_settings_save_surfaces_filesystem_errors(monkeypatch):
     assert "Could not save settings" in scene.error_message
 
 
+def test_settings_clear_trusted_hosts_updates_notice():
+    pygame = _pygame()
+    from client.gui.scene_manager import SceneManager
+    from client.gui.scenes.settings import SettingsScene
+
+    client = _DummyClient()
+    manager = SceneManager(pygame.Surface((800, 600)))
+    scene = SettingsScene(manager, client=client)
+    scene.on_enter()
+
+    scene._clear_trusted_hosts()
+
+    assert client.trusted_hosts_cleared is True
+    assert scene.notice_message == "Trusted hosts cleared."
+    assert scene.error_message == ""
+
+
 def test_settings_tab_cycles_focus_between_fields():
     pygame = _pygame()
     from client.gui.scene_manager import SceneManager
@@ -372,6 +394,14 @@ def test_join_dialog_validation():
     scene.room_key_input.text = "shared-key"
     scene._connect()
     assert scene.error_message
+
+    scene = JoinDialogScene(manager, client=_DummyClient())
+    scene.on_enter()
+    scene.host_input.text = "127.0.0.1"
+    scene.port_input.text = "9000"
+    scene.room_key_input.text = ""
+    scene._connect()
+    assert scene.error_message == "Room key is required."
 
     scene.error_message = ""
     scene.host_input.text = "myserver.local"

@@ -5,7 +5,6 @@ import time
 
 from client.client import (
     CONNECT_ACK_FORMAT,
-    CONNECT_REQ_FORMAT,
     GameClient,
     RELIABLE_EVENT_JOIN,
     RELIABLE_EVENT_FORMAT,
@@ -13,15 +12,28 @@ from client.client import (
     RELIABLE_EVENT_SCORE_SYNC,
 )
 from common.packet import (
-    HANDSHAKE_DISCONNECT_FORMAT,
     Packet,
     PacketType,
+    DISCONNECT_REASON_FORMAT,
+    DISCONNECT_REASON_NONE,
+    pack_connect_request,
     pack_connection_epoch,
     unpack_connection_epoch,
 )
 from server.client_manager import ClientManager
 from server.server import GameServer
 from server.session_manager import Session, SessionManager
+
+
+TEST_ROOM_KEY = "session-reconnect-room-key"
+
+
+def _make_server() -> GameServer:
+    return GameServer(port=0, verbose=False, room_key=TEST_ROOM_KEY)
+
+
+def _connect_req_payload(token: str | None = None, nonce: int = 1) -> bytes:
+    return pack_connect_request(token, nonce, TEST_ROOM_KEY)
 
 
 def test_reconnect_by_token():
@@ -109,7 +121,7 @@ def test_score_sync_replaces_local_scores():
 
 
 def test_game_started_resets_when_server_empties():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9000)
         client = server.client_mgr.add_client(addr)
@@ -133,7 +145,7 @@ def test_game_started_resets_when_server_empties():
 
 
 def test_reconnecting_client_accepts_fresh_low_sequence_packets():
-    client = GameClient(headless=True)
+    client = GameClient(headless=True, room_key=TEST_ROOM_KEY)
     try:
         client.ack_tracker.on_packet_received(400)
         client.conn_state = type(client.conn_state).RECONNECTING
@@ -156,7 +168,7 @@ def test_reconnecting_client_accepts_fresh_low_sequence_packets():
 
 
 def test_server_removes_timed_out_clients_on_tick():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9000)
         client = server.client_mgr.add_client(addr)
@@ -176,7 +188,7 @@ def test_server_removes_timed_out_clients_on_tick():
 
 
 def test_timed_out_session_can_reconnect_with_saved_token():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         old_addr = ("127.0.0.1", 9000)
         new_addr = ("127.0.0.1", 9010)
@@ -193,11 +205,7 @@ def test_timed_out_session_can_reconnect_with_saved_token():
 
         reconnect_packet = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                3,
-            ),
+            payload=_connect_req_payload(client.session_token, 3),
         )
         server._handle_packet(reconnect_packet.serialize(), new_addr)
 
@@ -211,7 +219,7 @@ def test_timed_out_session_can_reconnect_with_saved_token():
 
 
 def test_timed_out_session_reconnect_restores_respawn_state():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         peer_addr = ("127.0.0.1", 9050)
         old_addr = ("127.0.0.1", 9060)
@@ -235,11 +243,7 @@ def test_timed_out_session_reconnect_restores_respawn_state():
         server.game_state.tick = 5
         reconnect_packet = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                2,
-            ),
+            payload=_connect_req_payload(client.session_token, 2),
         )
         server._handle_packet(reconnect_packet.serialize(), new_addr)
 
@@ -252,7 +256,7 @@ def test_timed_out_session_reconnect_restores_respawn_state():
 
 
 def test_timed_out_session_reconnect_restores_active_modifier_effects():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         peer_addr = ("127.0.0.1", 9075)
         old_addr = ("127.0.0.1", 9080)
@@ -280,11 +284,7 @@ def test_timed_out_session_reconnect_restores_active_modifier_effects():
         server.game_state.tick = 4
         reconnect_packet = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                5,
-            ),
+            payload=_connect_req_payload(client.session_token, 5),
         )
         server._handle_packet(reconnect_packet.serialize(), new_addr)
 
@@ -297,7 +297,7 @@ def test_timed_out_session_reconnect_restores_active_modifier_effects():
 
 
 def test_full_reset_clears_stale_idle_reconnect_state():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         old_addr = ("127.0.0.1", 9100)
         new_addr = ("127.0.0.1", 9110)
@@ -318,11 +318,7 @@ def test_full_reset_clears_stale_idle_reconnect_state():
 
         reconnect_packet = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                2,
-            ),
+            payload=_connect_req_payload(client.session_token, 2),
         )
         server._handle_packet(reconnect_packet.serialize(), new_addr)
 
@@ -336,7 +332,7 @@ def test_full_reset_clears_stale_idle_reconnect_state():
 
 
 def test_expired_idle_session_clears_stale_score_and_restore_blob():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         peer_addr = ("127.0.0.1", 9120)
         timed_out_addr = ("127.0.0.1", 9130)
@@ -366,9 +362,9 @@ def test_expired_idle_session_clears_stale_score_and_restore_blob():
 
 
 def test_reconnect_restore_broadcasts_join_and_score_sync_to_peers():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     sent = []
-    server._sendto = lambda data, addr: sent.append((data, addr))
+    server._send_transport_bytes = lambda addr, data: sent.append((data, addr)) or True
     try:
         peer_addr = ("127.0.0.1", 9000)
         stale_addr = ("127.0.0.1", 9010)
@@ -396,11 +392,7 @@ def test_reconnect_restore_broadcasts_join_and_score_sync_to_peers():
 
         reconnect_packet = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                reconnecting.session_token.encode("ascii").ljust(16, b"\x00"),
-                3,
-            ),
+            payload=_connect_req_payload(reconnecting.session_token, 3),
         )
         server._handle_packet(reconnect_packet.serialize(), new_addr)
 
@@ -429,7 +421,7 @@ def test_reconnect_restore_broadcasts_join_and_score_sync_to_peers():
 
 
 def test_server_ignores_early_nonconnect_packets_after_connect():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9000)
         client = server.client_mgr.add_client(addr)
@@ -467,19 +459,25 @@ def test_server_ignores_early_nonconnect_packets_after_connect():
 
 
 def test_recent_disconnect_addr_is_temporarily_ignored_then_allows_new_connect():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9000)
         old_client = server.client_mgr.add_client(addr)
         old_client.ack_tracker.local_sequence = 25
 
         server._remove_client(old_client, "test cleanup", broadcast_leave=False)
-        server._handle_packet(Packet(PacketType.CONNECT_REQ).serialize(), addr)
+        server._handle_packet(
+            Packet(PacketType.CONNECT_REQ, payload=_connect_req_payload(None, 1)).serialize(),
+            addr,
+        )
 
         assert server.client_mgr.get_by_address(addr) is None
 
         server.recent_disconnect_addrs[addr] = (time.monotonic() - 1.0, 25)
-        server._handle_packet(Packet(PacketType.CONNECT_REQ).serialize(), addr)
+        server._handle_packet(
+            Packet(PacketType.CONNECT_REQ, payload=_connect_req_payload(None, 2)).serialize(),
+            addr,
+        )
 
         new_client = server.client_mgr.get_by_address(addr)
         assert new_client is not None
@@ -488,7 +486,7 @@ def test_recent_disconnect_addr_is_temporarily_ignored_then_allows_new_connect()
 
 
 def test_stale_reconnect_request_does_not_rebind_active_session():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         old_addr = ("127.0.0.1", 9000)
         new_addr = ("127.0.0.1", 9100)
@@ -501,19 +499,11 @@ def test_stale_reconnect_request_does_not_rebind_active_session():
 
         fresh_reconnect = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                6,
-            ),
+            payload=_connect_req_payload(client.session_token, 6),
         )
         stale_reconnect = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                5,
-            ),
+            payload=_connect_req_payload(client.session_token, 5),
         )
 
         server._handle_packet(fresh_reconnect.serialize(), new_addr)
@@ -532,7 +522,7 @@ def test_stale_reconnect_request_does_not_rebind_active_session():
 
 
 def test_same_address_reconnect_rotates_connection_epoch():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9050)
         client = server.client_mgr.add_client(addr)
@@ -543,11 +533,7 @@ def test_same_address_reconnect_rotates_connection_epoch():
 
         reconnect_packet = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                4,
-            ),
+            payload=_connect_req_payload(client.session_token, 4),
         )
 
         server._handle_packet(reconnect_packet.serialize(), addr)
@@ -560,7 +546,7 @@ def test_same_address_reconnect_rotates_connection_epoch():
 
 
 def test_token_only_reconnect_request_is_ignored():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         old_addr = ("127.0.0.1", 9000)
         new_addr = ("127.0.0.1", 9100)
@@ -571,10 +557,7 @@ def test_token_only_reconnect_request_is_ignored():
             old_addr, client.client_id, token=client.session_token
         )
 
-        legacy_reconnect = Packet(
-            PacketType.CONNECT_REQ,
-            payload=client.session_token.encode("ascii").ljust(16, b"\x00"),
-        )
+        legacy_reconnect = Packet(PacketType.CONNECT_REQ, payload=b"legacy-token-only")
 
         server._handle_packet(legacy_reconnect.serialize(), new_addr)
 
@@ -586,16 +569,12 @@ def test_token_only_reconnect_request_is_ignored():
 
 
 def test_unknown_reconnect_token_is_rejected_instead_of_creating_new_client():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9200)
         packet = Packet(
             PacketType.CONNECT_REQ,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                b"missing-token".ljust(16, b"\x00"),
-                9,
-            ),
+            payload=_connect_req_payload("missing-token", 9),
         )
 
         server._handle_packet(packet.serialize(), addr)
@@ -606,8 +585,8 @@ def test_unknown_reconnect_token_is_rejected_instead_of_creating_new_client():
         server.sock.close()
 
 
-def test_pending_connect_disconnect_by_nonce_removes_client():
-    server = GameServer(port=0, verbose=False)
+def test_disconnect_from_bound_address_removes_client():
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9300)
         client = server.client_mgr.add_client(addr)
@@ -616,11 +595,9 @@ def test_pending_connect_disconnect_by_nonce_removes_client():
 
         packet = Packet(
             PacketType.DISCONNECT,
-            payload=struct.pack(
-                HANDSHAKE_DISCONNECT_FORMAT,
-                b"\x00" * 16,
-                client.last_connect_nonce,
-                0,
+            payload=pack_connection_epoch(
+                client.connection_epoch,
+                struct.pack(DISCONNECT_REASON_FORMAT, DISCONNECT_REASON_NONE),
             ),
         )
 
@@ -631,8 +608,8 @@ def test_pending_connect_disconnect_by_nonce_removes_client():
         server.sock.close()
 
 
-def test_reconnecting_disconnect_by_token_removes_client():
-    server = GameServer(port=0, verbose=False)
+def test_disconnect_from_unknown_address_does_not_remove_client():
+    server = _make_server()
     try:
         old_addr = ("127.0.0.1", 9000)
         new_addr = ("127.0.0.1", 9400)
@@ -645,22 +622,18 @@ def test_reconnecting_disconnect_by_token_removes_client():
 
         packet = Packet(
             PacketType.DISCONNECT,
-            payload=struct.pack(
-                CONNECT_REQ_FORMAT,
-                client.session_token.encode("ascii").ljust(16, b"\x00"),
-                client.last_connect_nonce,
-            ),
+            payload=struct.pack(DISCONNECT_REASON_FORMAT, DISCONNECT_REASON_NONE),
         )
 
         server._handle_packet(packet.serialize(), new_addr)
 
-        assert server.client_mgr.get_by_token(client.session_token) is None
+        assert server.client_mgr.get_by_token(client.session_token) is client
     finally:
         server.sock.close()
 
 
 def test_stale_epoch_disconnect_does_not_match_handshake_cancel():
-    server = GameServer(port=0, verbose=False)
+    server = _make_server()
     try:
         addr = ("127.0.0.1", 9500)
         client = server.client_mgr.add_client(addr)

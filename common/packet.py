@@ -31,8 +31,6 @@ class PacketType:
     PONG = 0x07
     RELIABLE_EVENT = 0x08
     HEARTBEAT = 0x09
-    SECURE_HELLO = 0x0A
-    SECURE_HELLO_ACK = 0x0B
 
     _NAMES = {
         0x01: "CONNECT_REQ",
@@ -44,8 +42,6 @@ class PacketType:
         0x07: "PONG",
         0x08: "RELIABLE_EVENT",
         0x09: "HEARTBEAT",
-        0x0A: "SECURE_HELLO",
-        0x0B: "SECURE_HELLO_ACK",
     }
 
     @classmethod
@@ -103,46 +99,59 @@ MODIFIER_STATE_SIZE = struct.calcsize(MODIFIER_STATE_FORMAT)
 PING_FORMAT = "!d"
 PING_SIZE = struct.calcsize(PING_FORMAT)
 
+# Connect request payload:
+#     session_token(16 bytes, ASCII, NUL padded)
+#     connect_nonce(u32)
+#     room_key_length(u8)
+#     room_key_utf8(room_key_length bytes)
+CONNECT_TOKEN_SIZE = 16
+CONNECT_REQ_PREFIX_FORMAT = f"!{CONNECT_TOKEN_SIZE}sIB"
+CONNECT_REQ_PREFIX_SIZE = struct.calcsize(CONNECT_REQ_PREFIX_FORMAT)
+
 # Optional disconnect payload: reason(u8)
 DISCONNECT_REASON_FORMAT = "!B"
 DISCONNECT_REASON_SIZE = struct.calcsize(DISCONNECT_REASON_FORMAT)
 DISCONNECT_REASON_NONE = 0x00
 DISCONNECT_REASON_KICKED = 0x01
-
-HANDSHAKE_DISCONNECT_FORMAT = "!16sIB"
-HANDSHAKE_DISCONNECT_SIZE = struct.calcsize(HANDSHAKE_DISCONNECT_FORMAT)
-CONNECT_CANCEL_NONCE_FORMAT = "!I"
-CONNECT_CANCEL_NONCE_SIZE = struct.calcsize(CONNECT_CANCEL_NONCE_FORMAT)
-DISCONNECT_REASON_SECURE_REQUIRED = 0x02
 DISCONNECT_REASON_AUTH_FAILED = 0x03
 
-SECURE_HANDSHAKE_PACKET_TYPES = frozenset(
-    {
-        PacketType.SECURE_HELLO,
-        PacketType.SECURE_HELLO_ACK,
-    }
-)
-ENCRYPTED_PACKET_TYPES = frozenset(
-    {
-        PacketType.CONNECT_REQ,
-        PacketType.CONNECT_ACK,
-        PacketType.DISCONNECT,
-        PacketType.INPUT,
-        PacketType.SNAPSHOT,
-        PacketType.PING,
-        PacketType.PONG,
-        PacketType.RELIABLE_EVENT,
-        PacketType.HEARTBEAT,
-    }
-)
+
+def pack_connect_request(
+    session_token: str | None,
+    connect_nonce: int,
+    room_key: str,
+) -> bytes:
+    token_bytes = (session_token or "").encode("ascii", errors="ignore")[
+        :CONNECT_TOKEN_SIZE
+    ]
+    token_bytes = token_bytes.ljust(CONNECT_TOKEN_SIZE, b"\x00")
+    room_key_bytes = room_key.encode("utf-8")
+    if len(room_key_bytes) > 0xFF:
+        raise ValueError("Room key must be at most 255 UTF-8 bytes.")
+    return struct.pack(
+        CONNECT_REQ_PREFIX_FORMAT,
+        token_bytes,
+        connect_nonce & 0xFFFFFFFF,
+        len(room_key_bytes),
+    ) + room_key_bytes
 
 
-def packet_is_secure_handshake(packet_type: int) -> bool:
-    return packet_type in SECURE_HANDSHAKE_PACKET_TYPES
-
-
-def packet_requires_encryption(packet_type: int) -> bool:
-    return packet_type in ENCRYPTED_PACKET_TYPES
+def unpack_connect_request(payload: bytes) -> tuple[str | None, int, str] | None:
+    if len(payload) < CONNECT_REQ_PREFIX_SIZE:
+        return None
+    token_bytes, connect_nonce, room_key_length = struct.unpack(
+        CONNECT_REQ_PREFIX_FORMAT,
+        payload[:CONNECT_REQ_PREFIX_SIZE],
+    )
+    room_key_bytes = payload[CONNECT_REQ_PREFIX_SIZE:]
+    if len(room_key_bytes) != room_key_length:
+        return None
+    try:
+        room_key = room_key_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    token = token_bytes.decode("ascii", errors="ignore").rstrip("\x00")
+    return token or None, connect_nonce, room_key
 
 
 class Packet:
