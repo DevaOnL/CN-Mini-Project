@@ -474,6 +474,7 @@ class GameRenderer:
         local_id: int,
         metrics: dict,
         scores: dict | None = None,
+        player_names: dict[int, str] | None = None,
         modifiers: dict | None = None,
         draw_hud: bool = True,
         present: bool = True,
@@ -522,6 +523,7 @@ class GameRenderer:
                 )
 
         active_scores = scores or {}
+        visible_names = player_names or {}
         leader_id = None
         living_ids = [
             entity_id
@@ -538,15 +540,16 @@ class GameRenderer:
             self._draw_entity(
                 entity_id,
                 state,
-                f"P{entity_id}",
+                visible_names.get(entity_id, f"P{entity_id}"),
                 leader=entity_id == leader_id,
             )
 
         if local_state and "x" in local_state:
+            local_name = visible_names.get(local_id)
             self._draw_entity(
                 local_id,
                 local_state,
-                f"YOU (P{local_id})",
+                f"{local_name} (YOU)" if local_name else f"YOU (P{local_id})",
                 local=True,
                 leader=local_id == leader_id,
             )

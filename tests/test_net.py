@@ -11,6 +11,7 @@ from client.client import (
     ConnState,
     GameClient,
     ReliableChannel as ClientReliableChannel,
+    RELIABLE_EVENT_ALIAS_SYNC,
     RELIABLE_EVENT_FORMAT,
     RELIABLE_EVENT_KICKED,
     RELIABLE_EVENT_MATCH_RESET,
@@ -26,6 +27,7 @@ from common.packet import (
     DISCONNECT_REASON_FORMAT,
     DISCONNECT_REASON_NONE,
     DISCONNECT_REASON_KICKED,
+    pack_player_aliases,
     pack_connection_epoch,
 )
 from common.snapshot import EntityState, Snapshot
@@ -94,6 +96,27 @@ def test_duplicate_score_update_packet_is_ignored():
         client._handle_packet(data)
 
         assert client.scores.get(2) == 1
+    finally:
+        client.disconnect(close_socket=True)
+
+
+def test_alias_sync_updates_shared_player_names():
+    client = GameClient(headless=True)
+    try:
+        client.conn_state = ConnState.CONNECTED
+        client.client_id = 2
+        client.connection_epoch = 1
+        client.player_name = "Bravo"
+        payload = pack_connection_epoch(
+            client.connection_epoch,
+            struct.pack("!B", RELIABLE_EVENT_ALIAS_SYNC)
+            + pack_player_aliases({1: "Alpha", 2: "ServerBravo"}),
+        )
+        packet = Packet(PacketType.RELIABLE_EVENT, sequence=8, payload=payload)
+
+        client._handle_packet(packet.serialize())
+
+        assert client.player_names == {1: "Alpha", 2: "Bravo"}
     finally:
         client.disconnect(close_socket=True)
 

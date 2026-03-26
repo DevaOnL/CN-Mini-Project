@@ -26,6 +26,7 @@ from common.packet import (
     PING_FORMAT,
     PING_SIZE,
     CONNECT_TOKEN_SIZE,
+    pack_player_aliases,
     unpack_connect_request,
     packet_uses_connection_epoch,
     pack_connection_epoch,
@@ -66,6 +67,7 @@ RELIABLE_EVENT_MATCH_OVER = 0x06
 RELIABLE_EVENT_MATCH_RESET = 0x07
 RELIABLE_EVENT_KICK_PLAYER = 0x08
 RELIABLE_EVENT_KICKED = 0x09
+RELIABLE_EVENT_ALIAS_SYNC = 0x0A
 RELIABLE_SCORE_EVENT_FORMAT = "!BHH"
 POST_CONNECT_GUARD_SECS = 0.2
 KICK_GRACE_SECS = 2.0
@@ -301,6 +303,19 @@ class GameServer:
             if client_id not in self.pending_kicks
         )
 
+    def _active_clients(self) -> list[ConnectedClient]:
+        return [
+            client
+            for client in self.client_mgr.all_clients()
+            if client.client_id not in self.pending_kicks
+        ]
+
+    def _active_aliases(self) -> dict[int, str]:
+        return {
+            client.client_id: client.display_name
+            for client in self._active_clients()
+        }
+
     def _prune_kicked_tokens(self):
         now = time.monotonic()
         expired = [
@@ -386,7 +401,9 @@ class GameServer:
             client.ack_tracker.on_packet_sent(seq)
         return data, seq
 
-    def _parse_connect_request(self, payload: bytes) -> tuple[str | None, int, str] | None:
+    def _parse_connect_request(
+        self, payload: bytes
+    ) -> tuple[str | None, int, str, str] | None:
         return unpack_connect_request(payload)
 
     def _build_connect_ack_payload(
@@ -548,6 +565,17 @@ class GameServer:
                 continue
             self._send_reliable_event_to_client(client, RELIABLE_EVENT_GAME_START, 0)
 
+    def _broadcast_player_alias_sync(self):
+        aliases = self._active_aliases()
+        if not aliases:
+            return
+
+        payload = struct.pack("!B", RELIABLE_EVENT_ALIAS_SYNC) + pack_player_aliases(
+            aliases
+        )
+        for client in self._active_clients():
+            self._send_reliable_payload(client, payload)
+
     def _send_score_sync(self, client: ConnectedClient):
         if not self.game_state.scores or client.client_id in self.pending_kicks:
             return
@@ -700,7 +728,7 @@ class GameServer:
         parsed = self._parse_connect_request(pkt.payload)
         if parsed is None:
             return
-        reconnect_token, connect_nonce, room_key = parsed
+        reconnect_token, connect_nonce, room_key, player_name = parsed
 
         if room_key != self.room_key:
             self._send_disconnect_notice(addr, DISCONNECT_REASON_AUTH_FAILED)
@@ -718,6 +746,7 @@ class GameServer:
 
         client = self.client_mgr.get_by_address(addr)
         if client is not None:
+            client.display_name = player_name
             if client.client_id in self.pending_kicks:
                 self._send_reliable_event_to_client(
                     client,
@@ -752,6 +781,7 @@ class GameServer:
                     self._send_reliable_event_to_client(
                         client, RELIABLE_EVENT_MATCH_OVER, self.match_winner_id
                     )
+            self._broadcast_player_alias_sync()
             return
 
         if reconnect_token:
@@ -763,6 +793,7 @@ class GameServer:
                         session.client_id,
                         addr,
                         reconnect_token,
+                        display_name=player_name,
                     )
                     client.connection_epoch = self._allocate_connection_epoch()
                     client.last_connect_nonce = connect_nonce
@@ -857,6 +888,7 @@ class GameServer:
                     )
                     for active_client in self.client_mgr.all_clients():
                         self._send_score_sync(active_client)
+                    self._broadcast_player_alias_sync()
                     if self.game_state.game_started:
                         self._send_reliable_event_to_client(
                             client, RELIABLE_EVENT_GAME_START, 0
@@ -893,6 +925,7 @@ class GameServer:
                 if old_addr != addr:
                     self.dtls_transport.remove_peer(old_addr)
                 self.client_mgr.bind_address(client, addr)
+                client.display_name = player_name
                 self.recent_disconnect_addrs[old_addr] = (
                     time.monotonic() + POST_CONNECT_GUARD_SECS,
                     client.ack_tracker.local_sequence,
@@ -914,13 +947,14 @@ class GameServer:
                         self._send_reliable_event_to_client(
                             client, RELIABLE_EVENT_MATCH_OVER, self.match_winner_id
                         )
+                self._broadcast_player_alias_sync()
                 self._log(f"[SERVER] Client {client.client_id} reconnected from {addr}")
                 return
 
             self._send_disconnect_notice(addr, DISCONNECT_REASON_NONE)
             return
 
-        client = self.client_mgr.add_client(addr)
+        client = self.client_mgr.add_client(addr, display_name=player_name)
         client.connection_epoch = self._allocate_connection_epoch()
         client.last_connect_nonce = connect_nonce
         if addr in self.recent_disconnect_addrs:
@@ -934,6 +968,7 @@ class GameServer:
 
         self._send_connect_ack(client, connect_nonce)
         self._broadcast_presence_event(RELIABLE_EVENT_JOIN, client.client_id)
+        self._broadcast_player_alias_sync()
         if self.game_state.game_started:
             self._send_reliable_event_to_client(client, RELIABLE_EVENT_GAME_START, 0)
             self._send_score_sync(client)

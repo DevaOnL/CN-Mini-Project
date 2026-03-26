@@ -110,6 +110,38 @@ def test_two_clients_connect_and_share_lobby_and_game_start():
         server.sock.close()
 
 
+def test_connected_clients_receive_each_others_aliases():
+    server = _make_server()
+    host = GameClient(
+        server_host="127.0.0.1",
+        server_port=server.port,
+        headless=True,
+        room_key=TEST_ROOM_KEY,
+    )
+    guest = GameClient(
+        server_host="127.0.0.1",
+        server_port=server.port,
+        headless=True,
+        room_key=TEST_ROOM_KEY,
+    )
+    host.player_name = "Alpha"
+    guest.player_name = "Bravo"
+    try:
+        _connect_client(host, server)
+        _connect_client(guest, server)
+        _pump(server, host, guest, timeout=0.5)
+
+        assert host.display_name_for(1) == "Alpha"
+        assert host.display_name_for(2) == "Bravo"
+        assert guest.display_name_for(1) == "Alpha"
+        assert guest.display_name_for(2) == "Bravo"
+    finally:
+        host.disconnect(close_socket=True)
+        guest.disconnect(close_socket=True)
+        server.dtls_transport.close()
+        server.sock.close()
+
+
 def test_wrong_room_key_returns_auth_failed():
     server = _make_server()
     client = GameClient(

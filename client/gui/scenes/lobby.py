@@ -165,7 +165,7 @@ class LobbyScene(BaseScene):
         host_id = self._current_host_id()
         rows = []
         for entity_id in sorted(latest.entities):
-            label = f"P{entity_id}"
+            label = self.client.display_name_for(entity_id)
             tags = []
             if entity_id == host_id:
                 tags.append("HOST")

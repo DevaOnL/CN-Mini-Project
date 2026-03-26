@@ -36,6 +36,8 @@ class _DummyClient:
         self.current_rtt = 0.0
         self.current_jitter = 0.0
         self.current_fps = 60.0
+        self.player_name = "Player"
+        self.player_names = {}
         self.game_started_by_server = False
         self.connected = False
         self.show_debug_stats = True
@@ -68,6 +70,13 @@ class _DummyClient:
 
     def set_room_key(self, room_key):
         self.room_key = room_key
+
+    def display_name_for(self, client_id):
+        if client_id is None or client_id <= 0:
+            return self.player_name
+        if self.client_id is not None and client_id == self.client_id:
+            return self.player_name
+        return self.player_names.get(client_id, f"P{client_id}")
 
     def clear_trusted_hosts(self):
         self.trusted_hosts_cleared = True
@@ -504,6 +513,37 @@ def test_text_input_click_sets_caret_position():
     assert input_box.cursor_pos < len(input_box.text)
 
 
+def test_text_input_keydown_unicode_inserts_text_without_textinput_event():
+    pygame = _pygame()
+    from client.gui.widgets import TextInput
+
+    input_box = TextInput((100, 100, 160, 34), placeholder="Host")
+    input_box.focus()
+
+    input_box.handle_event(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_a, unicode="a", mod=0)
+    )
+
+    assert input_box.text == "a"
+    assert input_box.cursor_pos == 1
+
+
+def test_text_input_dedupes_following_textinput_echo_after_keydown_fallback():
+    pygame = _pygame()
+    from client.gui.widgets import TextInput
+
+    input_box = TextInput((100, 100, 160, 34), placeholder="Host")
+    input_box.focus()
+
+    input_box.handle_event(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_b, unicode="b", mod=0)
+    )
+    input_box.handle_event(pygame.event.Event(pygame.TEXTINPUT, text="b"))
+
+    assert input_box.text == "b"
+    assert input_box.cursor_pos == 1
+
+
 def test_host_validation_rejects_ipv6_literals():
     from client.gui.validation import is_valid_host
 
@@ -719,6 +759,8 @@ def test_lobby_player_rows_mark_local_player():
     manager = SceneManager(pygame.Surface((800, 600)))
     client = _DummyClient()
     client.client_id = 2
+    client.player_name = "Bravo"
+    client.player_names = {1: "Alpha", 2: "Bravo"}
     client.server_snapshots = [
         Snapshot(
             tick=1,
@@ -732,8 +774,8 @@ def test_lobby_player_rows_mark_local_player():
     scene = LobbyScene(manager, client=client, host=False)
 
     assert scene._build_player_rows() == [
-        (1, "P1 (HOST)"),
-        (2, "P2 (YOU)"),
+        (1, "Alpha (HOST)"),
+        (2, "Bravo (YOU)"),
     ]
 
 
@@ -1083,6 +1125,10 @@ def test_match_over_draw_handles_many_score_rows():
         current_rtt = 0.0
         server_snapshots = []
         connected = True
+
+        @staticmethod
+        def display_name_for(entity_id):
+            return f"P{entity_id}"
 
     surface = pygame.Surface((800, 600))
     manager = SceneManager(surface)

@@ -48,7 +48,9 @@ class MatchOverScene(BaseScene):
             winner_color = THEME["success"]
         else:
             winner_text = (
-                f"P{winner_id} WINS!" if winner_id is not None else "NO WINNER"
+                f"{self.client.display_name_for(winner_id)} WINS!"
+                if winner_id is not None
+                else "NO WINNER"
             )
             winner_color = THEME["text_gold"]
 
@@ -86,7 +88,7 @@ class MatchOverScene(BaseScene):
             display_rows = rows[:max_rows]
             for index, (entity_id, kills) in enumerate(display_rows):
                 y_pos = content_top + index * row_step
-                label = f"P{entity_id}"
+                label = self.client.display_name_for(entity_id)
                 if entity_id == self.client.client_id:
                     label += " (YOU)"
                 draw_hud_metric_card(

@@ -82,9 +82,14 @@ def test_trusted_host_store_records_and_rejects_mismatch(tmp_path):
 
 
 def test_connect_request_round_trip_and_malformed_lengths():
-    payload = pack_connect_request("reconnect-token", 17, "shared-room")
+    payload = pack_connect_request("reconnect-token", 17, "shared-room", "Alpha")
 
-    assert unpack_connect_request(payload) == ("reconnect-token", 17, "shared-room")
+    assert unpack_connect_request(payload) == (
+        "reconnect-token",
+        17,
+        "shared-room",
+        "Alpha",
+    )
     assert unpack_connect_request(payload[:-1]) is None
     assert unpack_connect_request(payload + b"\x00") is None
 

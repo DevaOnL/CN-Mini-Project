@@ -20,6 +20,7 @@ from common.packet import (
     PING_SIZE,
     CONNECT_TOKEN_SIZE,
     pack_connect_request,
+    unpack_player_aliases,
     CONNECTION_EPOCH_SIZE,
     DISCONNECT_REASON_FORMAT,
     DISCONNECT_REASON_SIZE,
@@ -74,6 +75,7 @@ RELIABLE_EVENT_MATCH_OVER = 0x06
 RELIABLE_EVENT_MATCH_RESET = 0x07
 RELIABLE_EVENT_KICK_PLAYER = 0x08
 RELIABLE_EVENT_KICKED = 0x09
+RELIABLE_EVENT_ALIAS_SYNC = 0x0A
 RELIABLE_SCORE_EVENT_FORMAT = "!BHH"
 
 
@@ -266,6 +268,7 @@ class GameClient:
         self.target_fps = 60
         self.current_fps = 0.0
         self.player_name = "Player"
+        self.player_names: dict[int, str] = {}
         self.show_debug_stats = True
         self.host_server_proc = None
         self.host_mode = False
@@ -295,6 +298,13 @@ class GameClient:
     def clear_trusted_hosts(self):
         clear_known_hosts_file(self.known_hosts_path)
 
+    def display_name_for(self, client_id: int | None) -> str:
+        if client_id is None or client_id <= 0:
+            return self.player_name or "Player"
+        if self.client_id is not None and client_id == self.client_id:
+            return self.player_name or self.player_names.get(client_id, "Player")
+        return self.player_names.get(client_id, f"P{client_id}")
+
     def _reset_dtls_state(self):
         if self._dtls_transport is not None:
             self._dtls_transport.close()
@@ -311,6 +321,8 @@ class GameClient:
             self.server_port = int(settings.get("port", self.server_port))
             self.server_addr = (self.server_host, self.server_port)
         self.player_name = str(settings.get("name", self.player_name))[:16] or "Player"
+        if self.client_id is not None:
+            self.player_names[self.client_id] = self.player_name
         self.target_fps = max(10, min(240, int(settings.get("fps", self.target_fps))))
         interp_ms = max(
             0,
@@ -646,6 +658,7 @@ class GameClient:
             self.session_token,
             self.connect_nonce,
             self.room_key,
+            self.player_name,
         )
         self._send_packet(PacketType.CONNECT_REQ, payload)
 
@@ -666,6 +679,7 @@ class GameClient:
         self.pre_reconnect_server_seq = None
         self.strict_server_sequence_until = 0.0
         self.awaiting_phase_sync = False
+        self.player_names = {}
         self.ack_tracker.reset()
         self.rtt_samples = []
         self.current_rtt = 0.0
@@ -834,6 +848,7 @@ class GameClient:
                 or self.session_token
             )
             self._reset_world_state()
+            self.player_names = {self.client_id: self.player_name}
             self.awaiting_phase_sync = True
             self.conn_state = ConnState.CONNECTED
             self.last_connection_error = None
@@ -1080,6 +1095,14 @@ class GameClient:
                 offset += pair_size
             self.scores = synced_scores
             label = "score_sync"
+        elif event_type == RELIABLE_EVENT_ALIAS_SYNC:
+            aliases = unpack_player_aliases(pkt.payload[1:])
+            if aliases is None:
+                return
+            if self.client_id is not None:
+                aliases[self.client_id] = self.player_name
+            self.player_names = aliases
+            label = "alias_sync"
         elif event_type == RELIABLE_EVENT_MATCH_RESET:
             self.match_winner_id = None
             self._reset_world_state()
@@ -1105,6 +1128,7 @@ class GameClient:
                 label = "join"
             elif event_type == RELIABLE_EVENT_LEAVE:
                 self.scores.pop(client_id, None)
+                self.player_names.pop(client_id, None)
                 label = "leave"
             elif event_type == RELIABLE_EVENT_MATCH_OVER:
                 self.match_winner_id = client_id

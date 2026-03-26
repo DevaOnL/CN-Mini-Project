@@ -191,6 +191,7 @@ class TextInput:
         self.text = ""
         self.focused = False
         self.cursor_pos = 0
+        self._pending_textinput_echo = ""
 
     def set_text(self, value: str):
         self.text = str(value)[: self.max_len]
@@ -204,6 +205,7 @@ class TextInput:
 
     def blur(self):
         self.focused = False
+        self._pending_textinput_echo = ""
         pygame.key.stop_text_input()
 
     def handle_event(self, event):
@@ -224,13 +226,10 @@ class TextInput:
                 self.blur()
 
         if event.type == pygame.TEXTINPUT and self.focused:
-            if len(self.text) < self.max_len:
-                self.text = (
-                    self.text[: self.cursor_pos]
-                    + event.text[: self.max_len - len(self.text)]
-                    + self.text[self.cursor_pos :]
-                )
-                self.cursor_pos = min(len(self.text), self.cursor_pos + len(event.text))
+            if self._pending_textinput_echo and event.text == self._pending_textinput_echo:
+                self._pending_textinput_echo = ""
+                return
+            self._insert_text(event.text)
             return
 
         if event.type != pygame.KEYDOWN or not self.focused:
@@ -255,6 +254,25 @@ class TextInput:
             self.cursor_pos = 0
         elif event.key == pygame.K_END:
             self.cursor_pos = len(self.text)
+        elif (
+            event.unicode
+            and event.unicode.isprintable()
+            and not (event.mod & (pygame.KMOD_CTRL | pygame.KMOD_ALT | pygame.KMOD_META))
+        ):
+            # Some Linux/SDL locale setups emit KEYDOWN unicode but never deliver
+            # TEXTINPUT events, so keep a direct-key fallback for simple text fields.
+            self._pending_textinput_echo = event.unicode
+            self._insert_text(event.unicode)
+
+    def _insert_text(self, text: str):
+        if not text or len(self.text) >= self.max_len:
+            return
+        available = self.max_len - len(self.text)
+        inserted = text[:available]
+        self.text = (
+            self.text[: self.cursor_pos] + inserted + self.text[self.cursor_pos :]
+        )
+        self.cursor_pos = min(len(self.text), self.cursor_pos + len(inserted))
 
     def draw(self, surface: pygame.Surface):
         border_color = THEME["input_focused"] if self.focused else THEME["input_border"]

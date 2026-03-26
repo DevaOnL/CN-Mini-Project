@@ -144,7 +144,7 @@ class GameHUDScene(BaseScene):
                 panel_rect.width - 28,
                 30,
             )
-            label = f"#{index}  P{entity_id}"
+            label = f"#{index}  {self.client.display_name_for(entity_id)}"
             if entity_id == self.client.client_id:
                 label += " (YOU)"
             elif entity_id not in active_players:
@@ -288,7 +288,12 @@ class GameHUDScene(BaseScene):
         dash_value = "READY" if dash_cd <= 0.0 else f"{dash_cd:.1f}s"
         dash_color = THEME["text_gold"] if dash_cd <= 0.0 else THEME["warning"]
         rows = [
-            ("Player", f"P{self.client.client_id or 0}", THEME["text_accent"], "sans"),
+            (
+                "Player",
+                self.client.display_name_for(self.client.client_id),
+                THEME["text_accent"],
+                "sans",
+            ),
             (
                 "Position",
                 f"{local.get('x', 0.0):.0f}, {local.get('y', 0.0):.0f}",
@@ -370,12 +375,18 @@ class GameHUDScene(BaseScene):
         latest_snapshot = (
             self.client.server_snapshots[-1] if self.client.server_snapshots else None
         )
+        player_names = dict(self.client.player_names)
+        if self.client.client_id is not None:
+            player_names[self.client.client_id] = self.client.display_name_for(
+                self.client.client_id
+            )
         self.renderer.render(
             self.client.visual_state,
             remote_states,
             self.client.client_id or 0,
             metrics,
             scores=self.client.scores,
+            player_names=player_names,
             modifiers=latest_snapshot.modifiers if latest_snapshot else {},
             draw_hud=False,
             present=False,
@@ -448,7 +459,7 @@ class GameHUDScene(BaseScene):
                 panel_rect.width - 36,
                 28,
             )
-            label = f"#{index}  P{entity_id}"
+            label = f"#{index}  {self.client.display_name_for(entity_id)}"
             if entity_id == self.client.client_id:
                 label += " (YOU)"
             elif entity_id not in players:
