@@ -2,6 +2,7 @@
 Networking utilities: socket creation, ack tracking, network simulation.
 """
 
+import ipaddress
 import socket
 import time
 import random
@@ -81,12 +82,7 @@ def local_ipv4_addresses() -> set[str]:
     return {ip_addr for ip_addr in addresses if ip_addr and not ip_addr.startswith("0.")}
 
 
-def detect_lan_ipv4(bind_host: str = "0.0.0.0") -> str:
-    """Best-effort LAN IPv4 detection for showing join instructions in the UI."""
-    normalized = bind_host.strip()
-    if normalized and normalized not in {"0.0.0.0", "127.0.0.1"}:
-        return normalized
-
+def _preferred_route_ipv4() -> str | None:
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         probe.connect(("8.8.8.8", 80))
@@ -94,26 +90,51 @@ def detect_lan_ipv4(bind_host: str = "0.0.0.0") -> str:
         if ip_addr and not ip_addr.startswith("127."):
             return ip_addr
     except OSError:
-        pass
+        return None
     finally:
         probe.close()
+    return None
 
-    try:
-        infos = socket.getaddrinfo(
-            socket.gethostname(),
-            None,
-            socket.AF_INET,
-            socket.SOCK_DGRAM,
-        )
-    except OSError:
-        infos = []
 
-    for _family, _socktype, _proto, _canonname, sockaddr in infos:
-        ip_addr = sockaddr[0]
-        if ip_addr and not ip_addr.startswith("127."):
-            return ip_addr
+def candidate_lan_ipv4_addresses(bind_host: str = "0.0.0.0") -> list[str]:
+    """Return best-effort LAN IPv4 candidates for sharing with other devices."""
+    normalized = bind_host.strip()
+    if normalized and normalized not in {"0.0.0.0", "127.0.0.1"}:
+        return [normalized]
 
-    return "127.0.0.1"
+    route_ip = _preferred_route_ipv4()
+    candidates = {
+        ip_addr
+        for ip_addr in local_ipv4_addresses()
+        if ip_addr and not ip_addr.startswith("127.")
+    }
+    if route_ip:
+        candidates.add(route_ip)
+
+    def sort_key(ip_addr: str) -> tuple[int, int, str]:
+        try:
+            addr = ipaddress.IPv4Address(ip_addr)
+        except ipaddress.AddressValueError:
+            return (-1000, 0, ip_addr)
+
+        rank = 0
+        if ip_addr == route_ip:
+            rank += 100
+        if addr.is_private:
+            rank += 20
+        elif addr.is_global:
+            rank += 10
+        elif addr.is_link_local:
+            rank += 5
+        return (-rank, int(addr), ip_addr)
+
+    return sorted(candidates, key=sort_key)
+
+
+def detect_lan_ipv4(bind_host: str = "0.0.0.0") -> str:
+    """Best-effort LAN IPv4 detection for showing join instructions in the UI."""
+    candidates = candidate_lan_ipv4_addresses(bind_host)
+    return candidates[0] if candidates else "127.0.0.1"
 
 
 class AckTracker:

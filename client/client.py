@@ -457,6 +457,11 @@ class GameClient:
 
         if self._dtls_transport.closed:
             notice = self._dtls_transport.last_error or "DTLS connection failed."
+            if notice == "DTLS handshake timed out.":
+                notice = (
+                    f"Timed out reaching {self.server_addr[0]}:{self.server_addr[1]}. "
+                    "Check the host LAN IP, firewall, and that both PCs are on the same network."
+                )
             self.last_connection_error = notice
             self.ui_notice = notice
             self._reset_connection_state(clear_notice=False)
@@ -611,6 +616,13 @@ class GameClient:
         if (
             self.conn_state in (ConnState.CONNECTING, ConnState.RECONNECTING)
             and now - self._last_connect_attempt_time < CONNECT_RETRY_INTERVAL
+        ):
+            return True
+        if (
+            self.conn_state in (ConnState.CONNECTING, ConnState.RECONNECTING)
+            and self._dtls_transport is not None
+            and not self._dtls_transport.closed
+            and not self._dtls_transport.handshake_complete
         ):
             return True
 

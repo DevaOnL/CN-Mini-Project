@@ -20,7 +20,13 @@ from client.client import (
     RELIABLE_SCORE_EVENT_FORMAT,
     SNAPSHOT_TRAILER_FORMAT,
 )
-from common.net import AckTracker, create_server_socket, detect_lan_ipv4
+from common.net import (
+    AckTracker,
+    candidate_lan_ipv4_addresses,
+    create_server_socket,
+    detect_lan_ipv4,
+)
+from common.dtls import DtlsClientTransport
 from common.packet import (
     Packet,
     PacketType,
@@ -809,6 +815,51 @@ def test_connect_treats_local_interface_ipv4_as_same_machine(monkeypatch):
         assert client.connect() is True
         assert client.server_addr == ("127.0.0.1", client.server_port)
         assert client.conn_state == ConnState.CONNECTING
+    finally:
+        client.disconnect(close_socket=True)
+
+
+def test_connect_does_not_restart_inflight_dtls_handshake():
+    client = GameClient(server_host="203.0.113.10", headless=True, room_key="shared-key")
+    try:
+        assert client.connect() is True
+        first_transport = client._dtls_transport
+
+        client._last_connect_attempt_time = 0.0
+        assert client.connect() is True
+
+        assert client._dtls_transport is first_transport
+        assert client.conn_state == ConnState.CONNECTING
+    finally:
+        client.disconnect(close_socket=True)
+
+
+def test_candidate_lan_ipv4_addresses_include_all_private_candidates(monkeypatch):
+    monkeypatch.setattr(
+        "common.net.local_ipv4_addresses",
+        lambda: {"127.0.0.1", "192.168.1.50", "10.20.204.1"},
+    )
+    monkeypatch.setattr("common.net._preferred_route_ipv4", lambda: "10.20.204.1")
+
+    assert candidate_lan_ipv4_addresses("0.0.0.0") == [
+        "10.20.204.1",
+        "192.168.1.50",
+    ]
+
+
+def test_dtls_handshake_timeout_reports_friendly_lan_hint():
+    client = GameClient(server_host="192.168.1.50", headless=True, room_key="shared-key")
+    try:
+        client.server_addr = ("192.168.1.50", client.server_port)
+        client.conn_state = ConnState.CONNECTING
+        client._dtls_transport = DtlsClientTransport(handshake_timeout=0.0)
+        client._dtls_transport.start()
+
+        client._pump_dtls_transport()
+
+        assert "Timed out reaching 192.168.1.50:9000." in client.last_connection_error
+        assert client.ui_notice == client.last_connection_error
+        assert client.conn_state == ConnState.DISCONNECTED
     finally:
         client.disconnect(close_socket=True)
 

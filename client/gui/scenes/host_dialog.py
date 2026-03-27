@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pygame
 
-from common.net import detect_lan_ipv4
+from common.net import candidate_lan_ipv4_addresses
 from client.gui.scene_manager import BaseScene
 from client.gui.theme import (
     THEME,
@@ -50,7 +50,7 @@ class HostDialogScene(BaseScene):
 
     def _layout(self, surface: pygame.Surface):
         width, height = surface.get_size()
-        self.panel.rect.size = (min(470, width - 120), 330)
+        self.panel.rect.size = (min(470, width - 120), 350)
         self.panel.rect.center = (width // 2, height // 2)
         self.room_key_input.rect.topleft = (
             self.panel.rect.x + 160,
@@ -111,12 +111,14 @@ class HostDialogScene(BaseScene):
     def draw(self, surface: pygame.Surface):
         self._layout(surface)
         width, _height = surface.get_size()
-        lan_ip = detect_lan_ipv4("0.0.0.0")
+        lan_ips = candidate_lan_ipv4_addresses("0.0.0.0")
         local_join = f"Same PC: 127.0.0.1:{self.client.server_port}"
-        if lan_ip == "127.0.0.1":
+        if not lan_ips:
             remote_join = "Other devices: no LAN IPv4 detected"
         else:
-            remote_join = f"Other devices: {lan_ip}:{self.client.server_port}"
+            remote_join = "Other devices: " + ", ".join(
+                f"{lan_ip}:{self.client.server_port}" for lan_ip in lan_ips
+            )
 
         draw_scene_background(surface, accent=(28, 58, 92))
         self.panel.draw(surface)
@@ -141,9 +143,9 @@ class HostDialogScene(BaseScene):
             f"{local_join}. {remote_join}. Use the same room key and the DTLS fingerprint shown in the lobby.",
             pygame.Rect(
                 self.panel.rect.x + 28,
-                self.panel.rect.bottom - 146,
+                self.panel.rect.y + 172,
                 self.panel.rect.width - 56,
-                40,
+                76,
             ),
             THEME["text_dim"],
             size=13,
@@ -155,7 +157,7 @@ class HostDialogScene(BaseScene):
                 surface,
                 pygame.Rect(
                     self.panel.rect.x + 28,
-                    self.panel.rect.bottom - 116,
+                    self.panel.rect.bottom - 126,
                     self.panel.rect.width - 56,
                     40,
                 ),

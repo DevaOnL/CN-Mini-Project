@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pygame
 
-from common.net import detect_lan_ipv4
+from common.net import candidate_lan_ipv4_addresses
 
 from client.gui.scene_manager import BaseScene
 from client.gui.theme import (
@@ -374,32 +374,39 @@ class LobbyScene(BaseScene):
             get_font(14, bold=True).render(role_label, True, role_color),
             (self.right_panel.rect.x + 22, self.right_panel.rect.y + 86),
         )
-        endpoint_host = self.client.server_addr[0]
-        endpoint_label = "Endpoint"
-        if self.host:
-            endpoint_host = detect_lan_ipv4(endpoint_host)
-            endpoint_label = "LAN"
-        endpoint = f"{endpoint_label}: {endpoint_host}:{self.client.server_addr[1]}"
-        draw_wrapped_text(
-            surface,
-            endpoint,
-            pygame.Rect(
-                self.right_panel.rect.x + 22,
-                self.right_panel.rect.y + 116,
-                self.right_panel.rect.width - 44,
-                22,
-            ),
-            THEME["text_dim"],
-            size=13,
-            align="left",
+        endpoint_rect = pygame.Rect(
+            self.right_panel.rect.x + 22,
+            self.right_panel.rect.y + 116,
+            self.right_panel.rect.width - 44,
+            22,
         )
+        details_y = endpoint_rect.y
         if self.host:
+            lan_ips = candidate_lan_ipv4_addresses(self.client.server_addr[0])
+            endpoint = (
+                "LAN: "
+                + ", ".join(
+                    f"{lan_ip}:{self.client.server_addr[1]}" for lan_ip in lan_ips
+                )
+                if lan_ips
+                else "LAN: no LAN IPv4 detected"
+            )
+            endpoint_rect.height = 44 if len(lan_ips) > 1 else 24
+            draw_wrapped_text(
+                surface,
+                endpoint,
+                endpoint_rect,
+                THEME["text_dim"],
+                size=13,
+                align="left",
+            )
+            details_y = endpoint_rect.bottom + 2
             draw_wrapped_text(
                 surface,
                 f"Same PC: 127.0.0.1:{self.client.server_addr[1]}",
                 pygame.Rect(
                     self.right_panel.rect.x + 22,
-                    self.right_panel.rect.y + 136,
+                    details_y,
                     self.right_panel.rect.width - 44,
                     18,
                 ),
@@ -407,14 +414,26 @@ class LobbyScene(BaseScene):
                 size=12,
                 align="left",
             )
+            details_y += 24
+        else:
+            endpoint = f"Endpoint: {self.client.server_addr[0]}:{self.client.server_addr[1]}"
+            draw_wrapped_text(
+                surface,
+                endpoint,
+                endpoint_rect,
+                THEME["text_dim"],
+                size=13,
+                align="left",
+            )
+            details_y = endpoint_rect.bottom + 14
         secure_label = "DTLS secured"
         surface.blit(
             get_font(12, bold=True).render(secure_label, True, THEME["text_accent"]),
-            (self.right_panel.rect.x + 22, self.right_panel.rect.y + 160),
+            (self.right_panel.rect.x + 22, details_y),
         )
         surface.blit(
             get_font(12).render("Room key required", True, THEME["text_dim"]),
-            (self.right_panel.rect.x + 22, self.right_panel.rect.y + 178),
+            (self.right_panel.rect.x + 22, details_y + 18),
         )
         fingerprint = (
             self.client.server_certificate_fingerprint or "Fingerprint pending..."
@@ -424,9 +443,9 @@ class LobbyScene(BaseScene):
             f"Fingerprint {fingerprint}",
             pygame.Rect(
                 self.right_panel.rect.x + 22,
-                self.right_panel.rect.y + 198,
+                details_y + 38,
                 self.right_panel.rect.width - 44,
-                max(28, self.start_button.rect.y - (self.right_panel.rect.y + 198) - 12),
+                max(28, self.start_button.rect.y - (details_y + 38) - 12),
             ),
             THEME["text_dim"],
             size=11,

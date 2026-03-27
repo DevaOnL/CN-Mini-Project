@@ -365,8 +365,15 @@ class _DtlsEndpoint:
 
 
 class DtlsClientTransport:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        handshake_timeout: float = DTLS_HANDSHAKE_TIMEOUT_SECS,
+        idle_timeout: float = DTLS_IDLE_TIMEOUT_SECS,
+    ):
         self._endpoint = _DtlsEndpoint(_client_context(), server_side=False)
+        self.handshake_timeout = handshake_timeout
+        self.idle_timeout = idle_timeout
 
     @property
     def handshake_complete(self) -> bool:
@@ -394,6 +401,18 @@ class DtlsClientTransport:
 
     def poll(self):
         self._endpoint.poll()
+        if self._endpoint.closed:
+            return
+        now = time.monotonic()
+        if self._endpoint.expired(
+            now=now,
+            handshake_timeout=self.handshake_timeout,
+            idle_timeout=self.idle_timeout,
+        ):
+            if self._endpoint.handshake_complete:
+                self._endpoint._fail("DTLS connection timed out.")
+            else:
+                self._endpoint._fail("DTLS handshake timed out.")
 
     def drain_outbound(self) -> list[bytes]:
         return self._endpoint.pop_outbound()
