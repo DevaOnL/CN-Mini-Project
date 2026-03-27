@@ -112,6 +112,11 @@ class HostDialogScene(BaseScene):
         self._layout(surface)
         width, _height = surface.get_size()
         lan_ip = detect_lan_ipv4("0.0.0.0")
+        local_join = f"Same PC: 127.0.0.1:{self.client.server_port}"
+        if lan_ip == "127.0.0.1":
+            remote_join = "Other devices: no LAN IPv4 detected"
+        else:
+            remote_join = f"Other devices: {lan_ip}:{self.client.server_port}"
 
         draw_scene_background(surface, accent=(28, 58, 92))
         self.panel.draw(surface)
@@ -133,7 +138,7 @@ class HostDialogScene(BaseScene):
 
         draw_wrapped_text(
             surface,
-            f"Players join with {lan_ip}:{self.client.server_port}, this room key, and the DTLS host fingerprint shown in the lobby.",
+            f"{local_join}. {remote_join}. Use the same room key and the DTLS fingerprint shown in the lobby.",
             pygame.Rect(
                 self.panel.rect.x + 28,
                 self.panel.rect.bottom - 146,

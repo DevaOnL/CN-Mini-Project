@@ -375,9 +375,11 @@ class LobbyScene(BaseScene):
             (self.right_panel.rect.x + 22, self.right_panel.rect.y + 86),
         )
         endpoint_host = self.client.server_addr[0]
+        endpoint_label = "Endpoint"
         if self.host:
             endpoint_host = detect_lan_ipv4(endpoint_host)
-        endpoint = f"{endpoint_host}:{self.client.server_addr[1]}"
+            endpoint_label = "LAN"
+        endpoint = f"{endpoint_label}: {endpoint_host}:{self.client.server_addr[1]}"
         draw_wrapped_text(
             surface,
             endpoint,
@@ -385,20 +387,34 @@ class LobbyScene(BaseScene):
                 self.right_panel.rect.x + 22,
                 self.right_panel.rect.y + 116,
                 self.right_panel.rect.width - 44,
-                34,
+                22,
             ),
             THEME["text_dim"],
             size=13,
             align="left",
         )
+        if self.host:
+            draw_wrapped_text(
+                surface,
+                f"Same PC: 127.0.0.1:{self.client.server_addr[1]}",
+                pygame.Rect(
+                    self.right_panel.rect.x + 22,
+                    self.right_panel.rect.y + 136,
+                    self.right_panel.rect.width - 44,
+                    18,
+                ),
+                THEME["text_dim"],
+                size=12,
+                align="left",
+            )
         secure_label = "DTLS secured"
         surface.blit(
             get_font(12, bold=True).render(secure_label, True, THEME["text_accent"]),
-            (self.right_panel.rect.x + 22, self.right_panel.rect.y + 150),
+            (self.right_panel.rect.x + 22, self.right_panel.rect.y + 160),
         )
         surface.blit(
             get_font(12).render("Room key required", True, THEME["text_dim"]),
-            (self.right_panel.rect.x + 22, self.right_panel.rect.y + 168),
+            (self.right_panel.rect.x + 22, self.right_panel.rect.y + 178),
         )
         fingerprint = (
             self.client.server_certificate_fingerprint or "Fingerprint pending..."
@@ -408,9 +424,9 @@ class LobbyScene(BaseScene):
             f"Fingerprint {fingerprint}",
             pygame.Rect(
                 self.right_panel.rect.x + 22,
-                self.right_panel.rect.y + 188,
+                self.right_panel.rect.y + 198,
                 self.right_panel.rect.width - 44,
-                max(28, self.start_button.rect.y - (self.right_panel.rect.y + 188) - 12),
+                max(28, self.start_button.rect.y - (self.right_panel.rect.y + 198) - 12),
             ),
             THEME["text_dim"],
             size=11,

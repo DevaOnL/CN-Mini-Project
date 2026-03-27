@@ -37,11 +37,66 @@ def create_client_socket() -> socket.socket:
     return sock
 
 
+def local_ipv4_addresses() -> set[str]:
+    """Best-effort discovery of IPv4 addresses assigned to this machine."""
+    addresses = {"127.0.0.1"}
+    hostnames = []
+    try:
+        hostnames.append(socket.gethostname())
+    except OSError:
+        pass
+    try:
+        hostnames.append(socket.getfqdn())
+    except OSError:
+        pass
+
+    for hostname in hostnames:
+        if not hostname:
+            continue
+        try:
+            infos = socket.getaddrinfo(
+                hostname,
+                None,
+                socket.AF_INET,
+                socket.SOCK_DGRAM,
+            )
+        except OSError:
+            continue
+        for _family, _socktype, _proto, _canonname, sockaddr in infos:
+            ip_addr = sockaddr[0]
+            if ip_addr:
+                addresses.add(ip_addr)
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        ip_addr = probe.getsockname()[0]
+        if ip_addr:
+            addresses.add(ip_addr)
+    except OSError:
+        pass
+    finally:
+        probe.close()
+
+    return {ip_addr for ip_addr in addresses if ip_addr and not ip_addr.startswith("0.")}
+
+
 def detect_lan_ipv4(bind_host: str = "0.0.0.0") -> str:
     """Best-effort LAN IPv4 detection for showing join instructions in the UI."""
     normalized = bind_host.strip()
     if normalized and normalized not in {"0.0.0.0", "127.0.0.1"}:
         return normalized
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        ip_addr = probe.getsockname()[0]
+        if ip_addr and not ip_addr.startswith("127."):
+            return ip_addr
+    except OSError:
+        pass
+    finally:
+        probe.close()
 
     try:
         infos = socket.getaddrinfo(
@@ -57,17 +112,6 @@ def detect_lan_ipv4(bind_host: str = "0.0.0.0") -> str:
         ip_addr = sockaddr[0]
         if ip_addr and not ip_addr.startswith("127."):
             return ip_addr
-
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.connect(("8.8.8.8", 80))
-        ip_addr = probe.getsockname()[0]
-        if ip_addr and not ip_addr.startswith("127."):
-            return ip_addr
-    except OSError:
-        pass
-    finally:
-        probe.close()
 
     return "127.0.0.1"
 

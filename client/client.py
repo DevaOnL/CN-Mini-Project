@@ -37,7 +37,12 @@ from common.dtls import (
     clear_known_hosts as clear_known_hosts_file,
     verify_or_trust_host,
 )
-from common.net import create_client_socket, AckTracker, NetworkSimulator
+from common.net import (
+    create_client_socket,
+    AckTracker,
+    NetworkSimulator,
+    local_ipv4_addresses,
+)
 from common.snapshot import Snapshot
 from common.config import (
     DEFAULT_PORT,
@@ -548,6 +553,9 @@ class GameClient:
             pass
 
         if normalized in local_aliases:
+            return "127.0.0.1"
+
+        if normalized in {ip_addr.lower() for ip_addr in local_ipv4_addresses()}:
             return "127.0.0.1"
         return None
 

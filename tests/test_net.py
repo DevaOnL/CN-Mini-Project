@@ -20,7 +20,7 @@ from client.client import (
     RELIABLE_SCORE_EVENT_FORMAT,
     SNAPSHOT_TRAILER_FORMAT,
 )
-from common.net import AckTracker, create_server_socket
+from common.net import AckTracker, create_server_socket, detect_lan_ipv4
 from common.packet import (
     Packet,
     PacketType,
@@ -796,6 +796,47 @@ def test_connect_uses_loopback_for_local_hostname_without_dns(monkeypatch):
         assert client.last_connection_error is None
     finally:
         client.disconnect(close_socket=True)
+
+
+def test_connect_treats_local_interface_ipv4_as_same_machine(monkeypatch):
+    client = GameClient(server_host="192.168.56.1", headless=True, room_key="shared-key")
+    try:
+        monkeypatch.setattr(
+            "client.client.local_ipv4_addresses",
+            lambda: {"127.0.0.1", "192.168.56.1"},
+        )
+
+        assert client.connect() is True
+        assert client.server_addr == ("127.0.0.1", client.server_port)
+        assert client.conn_state == ConnState.CONNECTING
+    finally:
+        client.disconnect(close_socket=True)
+
+
+def test_detect_lan_ipv4_prefers_primary_route_over_hostname_guess(monkeypatch):
+    class _ProbeSocket:
+        def __init__(self, *_args, **_kwargs):
+            self.connected = False
+
+        def connect(self, addr):
+            self.connected = True
+            assert addr == ("8.8.8.8", 80)
+
+        def getsockname(self):
+            return ("10.20.204.1", 12345)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "common.net.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_DGRAM, 0, "", ("192.168.56.1", 0))
+        ],
+    )
+    monkeypatch.setattr("common.net.socket.socket", lambda *_args, **_kwargs: _ProbeSocket())
+
+    assert detect_lan_ipv4("0.0.0.0") == "10.20.204.1"
 
 
 def test_connect_reports_ipv6_only_resolution_clearly(monkeypatch):
